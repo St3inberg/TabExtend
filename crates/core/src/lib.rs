@@ -5,6 +5,7 @@
 
 pub mod check;
 pub mod encoder;
+pub mod input;
 pub mod pairing;
 pub mod portal;
 pub mod protocol;

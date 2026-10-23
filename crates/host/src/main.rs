@@ -28,6 +28,7 @@ Commands:
   serve              Wait for paired tablets and stream to them
   devices            List paired tablets
   unpair <fp>        Forget a tablet (fingerprint, or its first characters)
+  forget-permission  Make GNOME ask again for screen sharing and input
 
 Options:
   --encoder NAME     Use this GStreamer encoder element
@@ -75,6 +76,7 @@ fn main() -> ExitCode {
         Some("serve") => run_server(&options, false),
         Some("devices") => list_devices(),
         Some("unpair") => unpair(options.argument.as_deref()),
+        Some("forget-permission") => forget_permission(),
         Some(other) => return usage_error(&format!("unknown command `{other}`")),
         None => return usage_error("no command given"),
     };
@@ -164,7 +166,7 @@ fn run_server(options: &Options, pairing: bool) -> Result<(), String> {
     let address = SocketAddr::new(ip, options.port.unwrap_or(DEFAULT_PORT));
 
     let capture: Arc<dyn CaptureBackend> = if options.test_pattern {
-        Arc::new(TestPattern)
+        Arc::new(TestPattern::default())
     } else {
         let state_dir = data_dir.join("state");
         Arc::new(PortalVirtualMonitor::new(state_dir))
@@ -300,6 +302,22 @@ fn unpair(prefix: Option<&str>) -> Result<(), String> {
             "{prefix} matches several tablets; give more characters"
         )),
     }
+}
+
+fn forget_permission() -> Result<(), String> {
+    let data_dir = default_data_dir().map_err(|e| e.to_string())?;
+    let had = PortalVirtualMonitor::new(data_dir.join("state"))
+        .forget_permission()
+        .map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        if had {
+            "Forgot GNOME's saved permission. The next connection shows the sharing dialog."
+        } else {
+            "There was no saved permission."
+        }
+    );
+    Ok(())
 }
 
 fn usage_error(message: &str) -> ExitCode {

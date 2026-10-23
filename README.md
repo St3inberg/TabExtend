@@ -5,9 +5,9 @@ Use an Android tablet as a wireless extended monitor for GNOME on Wayland.
 The tablet shows up in Settings → Displays as a real second screen. Drag
 windows onto it, and use touch and pen on it. No cable needed.
 
-> **Status: early development (milestone M0).** What works today is
-> `tabextend doctor`, which checks whether your machine can run TabExtend.
-> Streaming and the tablet app are next. See the [roadmap](docs/PRD.md#milestones).
+> **Status: work in progress.** Pairing and the extended monitor work over
+> Wi-Fi; touch input is blocked by a portal limitation with a known way
+> around it. Details in [docs/status.md](docs/status.md).
 
 ## Quick start
 
@@ -33,6 +33,7 @@ You need GStreamer and a video encoder installed first. The
 
 ## Documentation
 
+- [Status](docs/status.md): what works, what does not and why
 - [Setup tutorial](docs/setup.md): install, build and check your machine
 - [Development guide](docs/development.md): code layout, tests, tablet debugging
 - [Product requirements](docs/PRD.md): goals, requirements, roadmap

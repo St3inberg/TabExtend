@@ -31,10 +31,18 @@ object Protocol {
     private const val PING = 5
     private const val PONG = 6
     private const val REQUEST_KEYFRAME = 7
+    private const val PAIR_CHALLENGE = 8
+    private const val PAIR_REVEAL = 9
+    private const val TOUCH = 10
+    private const val POINTER_MOVE = 11
+    private const val BUTTON = 12
+    private const val SCROLL = 13
+    private const val KEY = 14
 
     fun maxLength(tag: Int): Int = when (tag) {
         VIDEO -> 1 + MAX_VIDEO_FRAME + 9
-        HELLO, WELCOME, REJECT, PING, PONG, REQUEST_KEYFRAME -> MAX_CONTROL_MESSAGE
+        HELLO, WELCOME, REJECT, PING, PONG, REQUEST_KEYFRAME, PAIR_CHALLENGE, PAIR_REVEAL,
+        TOUCH, POINTER_MOVE, BUTTON, SCROLL, KEY -> MAX_CONTROL_MESSAGE
         else -> throw ProtocolException("unknown message tag $tag")
     }
 
@@ -87,6 +95,33 @@ object Protocol {
                 body.u64(message.sentUs)
             }
             Message.RequestKeyframe -> body.u8(REQUEST_KEYFRAME)
+            is Message.Touch -> {
+                body.u8(TOUCH)
+                body.u8(message.slot)
+                body.u8(message.phase.code)
+                body.f32(message.x)
+                body.f32(message.y)
+            }
+            is Message.PointerMove -> {
+                body.u8(POINTER_MOVE)
+                body.f32(message.x)
+                body.f32(message.y)
+            }
+            is Message.Button -> {
+                body.u8(BUTTON)
+                body.u8(message.button.code)
+                body.u8(if (message.pressed) 1 else 0)
+            }
+            is Message.Scroll -> {
+                body.u8(SCROLL)
+                body.u16(message.horizontal)
+                body.u16(message.vertical)
+            }
+            is Message.Key -> {
+                body.u8(KEY)
+                body.u16(message.code)
+                body.u8(if (message.pressed) 1 else 0)
+            }
         }
         val bytes = body.toByteArray()
         return ByteBuffer.allocate(HEADER_LEN + bytes.size).putInt(bytes.size).put(bytes).array()
@@ -147,6 +182,22 @@ object Protocol {
             PING -> Message.Ping(r.u32(), r.u64())
             PONG -> Message.Pong(r.u32(), r.u64())
             REQUEST_KEYFRAME -> Message.RequestKeyframe
+            TOUCH -> {
+                val slot = r.u8()
+                val code = r.u8()
+                val phase = TouchPhase.entries.firstOrNull { it.code == code }
+                    ?: throw ProtocolException("unknown touch phase $code")
+                Message.Touch(slot, phase, r.f32(), r.f32())
+            }
+            POINTER_MOVE -> Message.PointerMove(r.f32(), r.f32())
+            BUTTON -> {
+                val code = r.u8()
+                val button = MouseButton.entries.firstOrNull { it.code == code }
+                    ?: throw ProtocolException("unknown mouse button $code")
+                Message.Button(button, r.flag())
+            }
+            SCROLL -> Message.Scroll(r.u16().toShort().toInt(), r.u16().toShort().toInt())
+            KEY -> Message.Key(r.u16(), r.flag())
             else -> throw ProtocolException("unknown message tag $tag")
         }
         if (r.remaining() != 0) throw ProtocolException("message has trailing bytes")
@@ -164,6 +215,7 @@ object Protocol {
         fun u64(v: Long) {
             for (shift in 56 downTo 0 step 8) write((v ushr shift).toInt())
         }
+        fun f32(v: Float) = u32(java.lang.Float.floatToRawIntBits(v).toLong() and 0xffff_ffffL)
         fun bytes(v: ByteArray) = write(v, 0, v.size)
         fun string(s: String) {
             val bytes = s.toByteArray(StandardCharsets.UTF_8)
@@ -183,6 +235,12 @@ object Protocol {
             need(1); return data[pos++].toInt() and 0xff
         }
         fun u16(): Int = (u8() shl 8) or u8()
+        fun f32(): Float = java.lang.Float.intBitsToFloat(u32().toInt())
+        fun flag(): Boolean = when (val v = u8()) {
+            0 -> false
+            1 -> true
+            else -> throw ProtocolException("unknown flag value $v")
+        }
         fun u32(): Long {
             need(4)
             var v = 0L
@@ -225,12 +283,17 @@ data class DisplayInfo(
     val refreshMillihz: Long,
 )
 
+enum class TouchPhase(val code: Int) { DOWN(0), MOVE(1), UP(2), CANCEL(3) }
+
+enum class MouseButton(val code: Int) { LEFT(1), MIDDLE(2), RIGHT(3), BACK(4), FORWARD(5) }
+
 enum class RejectReason(val code: Int) {
     UNSUPPORTED_VERSION(1),
     NOT_PAIRED(2),
     BAD_PAIRING_TOKEN(3),
     BUSY(4),
     CAPTURE_FAILED(5),
+    PAIRING_DENIED(6),
 }
 
 sealed class Message {
@@ -247,4 +310,15 @@ sealed class Message {
     data class Ping(val id: Long, val sentUs: Long) : Message()
     data class Pong(val id: Long, val sentUs: Long) : Message()
     data object RequestKeyframe : Message()
+
+    /** Positions are fractions of the stream, 0.0–1.0. */
+    data class Touch(val slot: Int, val phase: TouchPhase, val x: Float, val y: Float) : Message()
+    data class PointerMove(val x: Float, val y: Float) : Message()
+    data class Button(val button: MouseButton, val pressed: Boolean) : Message()
+
+    /** Wheel steps; positive is down and right. */
+    data class Scroll(val horizontal: Int, val vertical: Int) : Message()
+
+    /** A Linux evdev key code: what Android reports as the scan code. */
+    data class Key(val code: Int, val pressed: Boolean) : Message()
 }

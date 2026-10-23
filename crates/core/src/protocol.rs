@@ -55,6 +55,59 @@ pub enum RejectReason {
     PairingDenied = 6,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TouchPhase {
+    Down = 0,
+    Move = 1,
+    Up = 2,
+    /// The touch was taken over (e.g. by palm rejection); end it.
+    Cancel = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MouseButton {
+    Left = 1,
+    Middle = 2,
+    Right = 3,
+    Back = 4,
+    Forward = 5,
+}
+
+/// Input from the tablet. Positions are fractions of the stream, 0.0–1.0,
+/// so the tablet needs no knowledge of the host's pixel sizes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InputEvent {
+    /// One finger. Slots identify fingers while they are down.
+    Touch {
+        slot: u8,
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+    },
+    /// Mouse, trackpad or a hovering/touching pen.
+    PointerMove {
+        x: f32,
+        y: f32,
+    },
+    Button {
+        button: MouseButton,
+        pressed: bool,
+    },
+    /// Wheel steps. Positive is down and right, as in libinput.
+    Scroll {
+        horizontal: i16,
+        vertical: i16,
+    },
+    /// A physical key, as a Linux evdev key code (what Android reports as
+    /// the scan code).
+    Key {
+        code: u16,
+        pressed: bool,
+    },
+}
+
 /// How a tablet asks to be trusted, if it is not paired yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairingRequest {
@@ -68,7 +121,7 @@ pub enum PairingRequest {
     Confirm { commitment: [u8; NONCE_LEN] },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// Client → host, first message on every connection.
     Hello {
@@ -114,6 +167,8 @@ pub enum Message {
     PairReveal {
         nonce: [u8; NONCE_LEN],
     },
+    /// Client → host: touch, pointer, button, scroll or key.
+    Input(InputEvent),
 }
 
 mod tag {
@@ -126,6 +181,11 @@ mod tag {
     pub const REQUEST_KEYFRAME: u8 = 7;
     pub const PAIR_CHALLENGE: u8 = 8;
     pub const PAIR_REVEAL: u8 = 9;
+    pub const TOUCH: u8 = 10;
+    pub const POINTER_MOVE: u8 = 11;
+    pub const BUTTON: u8 = 12;
+    pub const SCROLL: u8 = 13;
+    pub const KEY: u8 = 14;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +240,12 @@ pub fn max_length(tag: u8) -> Result<usize, ProtocolError> {
         | tag::PONG
         | tag::REQUEST_KEYFRAME
         | tag::PAIR_CHALLENGE
-        | tag::PAIR_REVEAL => Ok(MAX_CONTROL_MESSAGE),
+        | tag::PAIR_REVEAL
+        | tag::TOUCH
+        | tag::POINTER_MOVE
+        | tag::BUTTON
+        | tag::SCROLL
+        | tag::KEY => Ok(MAX_CONTROL_MESSAGE),
         other => Err(ProtocolError::UnknownTag(other)),
     }
 }
@@ -274,6 +339,36 @@ impl Message {
                 body.u8(tag::PAIR_REVEAL);
                 body.bytes(nonce);
             }
+            Message::Input(InputEvent::Touch { slot, phase, x, y }) => {
+                body.u8(tag::TOUCH);
+                body.u8(*slot);
+                body.u8(*phase as u8);
+                body.f32(*x);
+                body.f32(*y);
+            }
+            Message::Input(InputEvent::PointerMove { x, y }) => {
+                body.u8(tag::POINTER_MOVE);
+                body.f32(*x);
+                body.f32(*y);
+            }
+            Message::Input(InputEvent::Button { button, pressed }) => {
+                body.u8(tag::BUTTON);
+                body.u8(*button as u8);
+                body.u8(u8::from(*pressed));
+            }
+            Message::Input(InputEvent::Scroll {
+                horizontal,
+                vertical,
+            }) => {
+                body.u8(tag::SCROLL);
+                body.u16(*horizontal as u16);
+                body.u16(*vertical as u16);
+            }
+            Message::Input(InputEvent::Key { code, pressed }) => {
+                body.u8(tag::KEY);
+                body.u16(*code);
+                body.u8(u8::from(*pressed));
+            }
         }
         let body = body.0;
         let mut out = Vec::with_capacity(HEADER_LEN + body.len());
@@ -364,6 +459,51 @@ impl Message {
             tag::REQUEST_KEYFRAME => Message::RequestKeyframe,
             tag::PAIR_CHALLENGE => Message::PairChallenge { nonce: r.array()? },
             tag::PAIR_REVEAL => Message::PairReveal { nonce: r.array()? },
+            tag::TOUCH => Message::Input(InputEvent::Touch {
+                slot: r.u8()?,
+                phase: match r.u8()? {
+                    0 => TouchPhase::Down,
+                    1 => TouchPhase::Move,
+                    2 => TouchPhase::Up,
+                    3 => TouchPhase::Cancel,
+                    value => {
+                        return Err(ProtocolError::UnknownValue {
+                            field: "touch phase",
+                            value,
+                        });
+                    }
+                },
+                x: r.f32()?,
+                y: r.f32()?,
+            }),
+            tag::POINTER_MOVE => Message::Input(InputEvent::PointerMove {
+                x: r.f32()?,
+                y: r.f32()?,
+            }),
+            tag::BUTTON => Message::Input(InputEvent::Button {
+                button: match r.u8()? {
+                    1 => MouseButton::Left,
+                    2 => MouseButton::Middle,
+                    3 => MouseButton::Right,
+                    4 => MouseButton::Back,
+                    5 => MouseButton::Forward,
+                    value => {
+                        return Err(ProtocolError::UnknownValue {
+                            field: "mouse button",
+                            value,
+                        });
+                    }
+                },
+                pressed: r.bool("button state")?,
+            }),
+            tag::SCROLL => Message::Input(InputEvent::Scroll {
+                horizontal: r.u16()? as i16,
+                vertical: r.u16()? as i16,
+            }),
+            tag::KEY => Message::Input(InputEvent::Key {
+                code: r.u16()?,
+                pressed: r.bool("key state")?,
+            }),
             other => return Err(ProtocolError::UnknownTag(other)),
         };
         if !r.0.is_empty() {
@@ -388,6 +528,9 @@ impl Writer {
     }
     fn u64(&mut self, v: u64) {
         self.0.extend_from_slice(&v.to_be_bytes());
+    }
+    fn f32(&mut self, v: f32) {
+        self.u32(v.to_bits());
     }
     fn bytes(&mut self, v: &[u8]) {
         self.0.extend_from_slice(v);
@@ -436,6 +579,10 @@ impl<'a> Reader<'a> {
     }
     fn u64(&mut self) -> Result<u64, ProtocolError> {
         Ok(u64::from_be_bytes(self.array()?))
+    }
+    /// Any bit pattern, NaN included; the input mapper rejects non-finite values.
+    fn f32(&mut self) -> Result<f32, ProtocolError> {
+        Ok(f32::from_bits(self.u32()?))
     }
     fn string(&mut self, max: usize) -> Result<String, ProtocolError> {
         let len = self.u16()? as usize;
@@ -523,7 +670,42 @@ mod tests {
                 reason: RejectReason::PairingDenied,
                 detail: String::new(),
             },
+            Message::Input(InputEvent::Touch {
+                slot: 3,
+                phase: TouchPhase::Move,
+                x: 0.25,
+                y: 1.0,
+            }),
+            Message::Input(InputEvent::PointerMove { x: 0.5, y: 0.0 }),
+            Message::Input(InputEvent::Button {
+                button: MouseButton::Right,
+                pressed: true,
+            }),
+            Message::Input(InputEvent::Scroll {
+                horizontal: -2,
+                vertical: 3,
+            }),
+            Message::Input(InputEvent::Key {
+                code: 30,
+                pressed: false,
+            }),
         ]
+    }
+
+    #[test]
+    fn known_bytes_for_touch() {
+        // Pins the wire format the Kotlin client also implements.
+        let encoded = Message::Input(InputEvent::Touch {
+            slot: 1,
+            phase: TouchPhase::Down,
+            x: 0.5,
+            y: 1.0,
+        })
+        .encode();
+        assert_eq!(
+            encoded,
+            [0, 0, 0, 11, 10, 1, 0, 0x3f, 0, 0, 0, 0x3f, 0x80, 0, 0]
+        );
     }
 
     fn split(encoded: &[u8]) -> (u32, &[u8]) {

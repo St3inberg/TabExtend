@@ -2,7 +2,7 @@
 //! client that behaves like the tablet app.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -10,6 +10,7 @@ use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signat
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use tabextend_core::encoder::{default_h264_encoders, select_encoder};
+use tabextend_core::input::InputCall;
 use tabextend_core::pairing::{Fingerprint, PairingWindow};
 use tabextend_core::protocol::{
     DisplayInfo, HEADER_LEN, Message, PAIRING_TOKEN_LEN, PROTOCOL_VERSION, PairingRequest,
@@ -30,20 +31,26 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 struct TestHost {
     address: SocketAddr,
     fingerprint: Fingerprint,
+    injected: Arc<Mutex<Vec<InputCall>>>,
     _dir: tempfile::TempDir,
 }
 
 async fn start_host() -> TestHost {
+    start_host_with(TestPattern::default()).await
+}
+
+async fn start_host_with(capture: TestPattern) -> TestHost {
     let dir = tempfile::tempdir().unwrap();
     let identity = HostIdentity::load_or_create(dir.path()).unwrap();
     let paired = PairedStore::new(dir.path()).unwrap();
     let probe = GstProbe::new(320, 240).unwrap();
     let encoder = select_encoder(&probe, &default_h264_encoders(), None)
         .expect("tests need a working H.264 encoder (e.g. x264enc or openh264enc)");
+    let injected = capture.injected();
     let server = Server::new(
         &identity,
         paired,
-        Arc::new(TestPattern),
+        Arc::new(capture),
         ServerOptions {
             encoder,
             max_width: None,
@@ -57,6 +64,7 @@ async fn start_host() -> TestHost {
     TestHost {
         address,
         fingerprint: identity.fingerprint,
+        injected,
         _dir: dir,
     }
 }
@@ -374,4 +382,152 @@ async fn oversized_message_closes_the_connection_and_host_survives() {
         .unwrap();
     next.hello(Some(TOKEN)).await;
     expect_stream(&mut next).await;
+}
+
+/// Wait until the host has delivered at least `count` input calls.
+async fn injected(host: &TestHost, count: usize) -> Vec<InputCall> {
+    for _ in 0..200 {
+        let calls = host.injected.lock().unwrap().clone();
+        if calls.len() >= count {
+            return calls;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "expected {count} input calls, got {:?}",
+        host.injected.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn touch_reaches_the_virtual_monitor_clipped_to_it() {
+    use tabextend_core::protocol::{InputEvent, TouchPhase};
+    let host = start_host().await;
+    let mut client = Tablet::new()
+        .connect(&host, host.fingerprint)
+        .await
+        .unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+
+    let touch = |phase, x, y| {
+        Message::Input(InputEvent::Touch {
+            slot: 0,
+            phase,
+            x,
+            y,
+        })
+    };
+    client.send(&touch(TouchPhase::Down, 0.5, 0.5)).await;
+    // Past the edge, and garbage: clipped, and dropped.
+    client.send(&touch(TouchPhase::Move, 2.0, -1.0)).await;
+    client
+        .send(&Message::Input(InputEvent::PointerMove {
+            x: f32::NAN,
+            y: 0.5,
+        }))
+        .await;
+    client.send(&touch(TouchPhase::Up, 0.0, 0.0)).await;
+
+    let calls = injected(&host, 3).await;
+    assert_eq!(
+        calls,
+        [
+            InputCall::TouchDown {
+                slot: 0,
+                x: 320.0,
+                y: 200.0
+            },
+            InputCall::TouchMotion {
+                slot: 0,
+                x: 639.0,
+                y: 0.0
+            },
+            InputCall::TouchUp { slot: 0 },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn disconnecting_mid_drag_releases_everything() {
+    use tabextend_core::protocol::{InputEvent, MouseButton};
+    let host = start_host().await;
+    let mut client = Tablet::new()
+        .connect(&host, host.fingerprint)
+        .await
+        .unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+
+    client
+        .send(&Message::Input(InputEvent::Button {
+            button: MouseButton::Left,
+            pressed: true,
+        }))
+        .await;
+    client
+        .send(&Message::Input(InputEvent::Key {
+            code: 42,
+            pressed: true,
+        }))
+        .await;
+    injected(&host, 2).await;
+    drop(client);
+
+    let calls = injected(&host, 4).await;
+    assert_eq!(
+        &calls[2..],
+        [
+            InputCall::PointerButton {
+                code: 0x110,
+                pressed: false
+            },
+            InputCall::Key {
+                code: 42,
+                pressed: false
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn refused_touch_falls_back_to_driving_the_pointer() {
+    use tabextend_core::protocol::{InputEvent, TouchPhase};
+    let host = start_host_with(TestPattern::refusing_touch()).await;
+    let mut client = Tablet::new()
+        .connect(&host, host.fingerprint)
+        .await
+        .unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+
+    let touch = |phase, x, y| {
+        Message::Input(InputEvent::Touch {
+            slot: 0,
+            phase,
+            x,
+            y,
+        })
+    };
+    client.send(&touch(TouchPhase::Down, 0.5, 0.5)).await;
+    client.send(&touch(TouchPhase::Move, 0.25, 0.5)).await;
+    client.send(&touch(TouchPhase::Up, 0.25, 0.5)).await;
+
+    // The first, refused touch is replayed as a press, not lost.
+    let calls = injected(&host, 4).await;
+    assert_eq!(
+        calls,
+        [
+            InputCall::PointerMotion { x: 320.0, y: 200.0 },
+            InputCall::PointerButton {
+                code: 0x110,
+                pressed: true
+            },
+            InputCall::PointerMotion { x: 160.0, y: 200.0 },
+            InputCall::PointerButton {
+                code: 0x110,
+                pressed: false
+            },
+        ]
+    );
 }

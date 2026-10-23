@@ -6,6 +6,8 @@ import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.IOException
 import java.io.OutputStream
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocket
 
 /**
@@ -34,9 +36,19 @@ class StreamSession(
 
     @Volatile private var running = true
     @Volatile private var socket: SSLSocket? = null
+    @Volatile private var streaming = false
+
+    /** Everything sent while streaming goes through here, to one writer thread. */
+    private val outbox = LinkedBlockingQueue<Message>(OUTBOX_CAPACITY)
     private val thread = Thread(::run, "tabextend-session")
 
     fun start() = thread.start()
+
+    /** Queue input for the host; dropped when not streaming or if the link is backed up. */
+    fun sendInput(messages: List<Message>) {
+        if (!streaming) return
+        for (message in messages) outbox.offer(message)
+    }
 
     fun stop() {
         running = false
@@ -104,17 +116,38 @@ class StreamSession(
             val width = welcome.width.toInt()
             val height = welcome.height.toInt()
             val decoder = VideoDecoder(width, height, surface)
+            outbox.clear()
+            val writer = Thread({ writeLoop(output) }, "tabextend-writer").apply { start() }
+            streaming = true
             listener.onStreaming(width, height, decoder.name, decoder.lowLatency)
             try {
-                stream(input, output, decoder)
+                stream(input, decoder)
             } finally {
+                streaming = false
+                writer.interrupt()
+                outbox.clear()
                 decoder.release()
             }
             return Outcome.Streamed
         }
     }
 
-    private fun stream(input: DataInputStream, output: OutputStream, decoder: VideoDecoder) {
+    /** Write queued messages, flushing whenever the queue runs dry. */
+    private fun writeLoop(output: OutputStream) {
+        try {
+            while (true) {
+                val message = outbox.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                output.write(Protocol.encode(message))
+                if (outbox.isEmpty()) output.flush()
+            }
+        } catch (e: InterruptedException) {
+            return
+        } catch (e: IOException) {
+            runCatching { socket?.close() } // the reader notices and reconnects
+        }
+    }
+
+    private fun stream(input: DataInputStream, decoder: VideoDecoder) {
         var waitingForKeyframe = true
         var windowStart = System.nanoTime()
         var windowFrames = decoder.framesRendered
@@ -128,10 +161,10 @@ class StreamSession(
                         waitingForKeyframe = false
                     } else if (!waitingForKeyframe) {
                         waitingForKeyframe = true
-                        send(output, Message.RequestKeyframe)
+                        outbox.offer(Message.RequestKeyframe)
                     }
                 }
-                is Message.Ping -> send(output, Message.Pong(message.id, message.sentUs))
+                is Message.Ping -> outbox.offer(Message.Pong(message.id, message.sentUs))
                 is Message.Reject -> throw IOException(message.detail)
                 else -> {}
             }
@@ -147,7 +180,8 @@ class StreamSession(
     }
 
     private fun rejected(reject: Message.Reject): Outcome = when (reject.reason) {
-        RejectReason.NOT_PAIRED, RejectReason.BAD_PAIRING_TOKEN, RejectReason.UNSUPPORTED_VERSION ->
+        RejectReason.NOT_PAIRED, RejectReason.BAD_PAIRING_TOKEN, RejectReason.UNSUPPORTED_VERSION,
+        RejectReason.PAIRING_DENIED ->
             Outcome.GiveUp(reject.detail)
         RejectReason.BUSY, RejectReason.CAPTURE_FAILED -> {
             listener.onStatus(reject.detail)
@@ -162,5 +196,6 @@ class StreamSession(
 
     private companion object {
         const val MAX_BACKOFF_MS = 5000L
+        const val OUTBOX_CAPACITY = 1024
     }
 }

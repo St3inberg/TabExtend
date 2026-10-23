@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -33,6 +34,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
     private lateinit var panel: LinearLayout
 
     private var session: StreamSession? = null
+    private val input = InputTranslator { surfaceView.width to surfaceView.height }
     private var pendingPairing: PairingLink? = null
     private var surfaceReady = false
     private var streamedSize: Pair<Int, Int>? = null
@@ -66,7 +68,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
     }
 
     private fun buildLayout() {
-        surfaceView = SurfaceView(this).apply { holder.addCallback(this@MainActivity) }
+        surfaceView = SurfaceView(this).apply {
+            holder.addCallback(this@MainActivity)
+            setOnTouchListener { _, event -> forward(input.onTouch(event)) }
+            setOnGenericMotionListener { _, event -> forward(input.onGenericMotion(event)) }
+        }
         status = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 18f
@@ -99,6 +105,23 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
             addView(panel, FrameLayout.LayoutParams(-1, -1))
             addView(stats, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
         })
+    }
+
+    /** Send input to the host while streaming; true means the event was used. */
+    private fun forward(messages: List<Message>): Boolean {
+        val active = session ?: return false
+        active.sendInput(messages)
+        return true
+    }
+
+    /** Keys from a physical keyboard go to the laptop; everything else stays here. */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val key = if (session != null && panel.visibility != View.VISIBLE) input.onKey(event) else null
+        if (key != null) {
+            session?.sendInput(listOf(key))
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     private fun goImmersive() {
@@ -158,6 +181,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
     private fun stopSession() {
         session?.stop()
         session = null
+        input.reset()
     }
 
     override fun onDestroy() {

@@ -14,6 +14,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tabextend_core::encoder::EncoderSpec;
+use tabextend_core::input::InputMapper;
 use tabextend_core::pairing::{Fingerprint, PairingWindow};
 use tabextend_core::protocol::{
     Codec, HEADER_LEN, MAX_CONTROL_MESSAGE, Message, PROTOCOL_VERSION, PairingRequest,
@@ -279,6 +280,9 @@ where
         )
         .map_err(io::Error::other)
     };
+    let (input_width, input_height) = capture.input_size();
+    let mut input = InputMapper::new(input_width, input_height);
+    let mut input_failed = false;
     let mut gpu_buffers = accepts_gpu_buffers(encoder);
     let mut pipeline = Some(start(gpu_buffers)?);
     let mut captured_before = 0;
@@ -346,6 +350,30 @@ where
                 Some(Ok(Message::Pong { sent_us, .. })) => {
                     stats.lock().expect("stats").rtt_us = now_us().saturating_sub(sent_us);
                 }
+                Some(Ok(Message::Input(event))) => {
+                    for call in input.map(event) {
+                        match capture.inject(call).await {
+                            Ok(()) => {}
+                            // Some desktops grant pointer but not touch. Detect
+                            // it from the first refusal rather than trusting
+                            // what the portal reports, and replay this event
+                            // as pointer input so the touch is not lost.
+                            Err(e) if call.is_touch() && !input.is_emulating_touch() => {
+                                eprintln!("  touch not allowed by the desktop ({e}, for {call:?}); fingers now drive the pointer");
+                                input.emulate_touch_with_pointer();
+                                for call in input.map(event) {
+                                    let _ = capture.inject(call).await;
+                                }
+                                break;
+                            }
+                            Err(e) => {
+                                if !std::mem::replace(&mut input_failed, true) {
+                                    eprintln!("  input not delivered: {e} ({call:?})");
+                                }
+                            }
+                        }
+                    }
+                }
                 Some(Ok(Message::RequestKeyframe)) => {
                     gate.lock().expect("gate").reset();
                     if let Some(p) = &pipeline { p.request_keyframe() }
@@ -373,6 +401,10 @@ where
         }
     };
     reader_task.abort();
+    // Nothing may stay pressed on the laptop after the tablet is gone.
+    for call in input.release_all() {
+        let _ = capture.inject(call).await;
+    }
     drop(pipeline);
     match result {
         Err(e) if is_disconnect(&e) => Ok(()),
