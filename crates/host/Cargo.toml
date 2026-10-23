@@ -1,0 +1,17 @@
+[package]
+name = "tabextend-host"
+description = "TabExtend host: turns an Android tablet into an extended monitor for GNOME on Wayland"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tabextend"
+path = "src/main.rs"
+
+[dependencies]
+tabextend-core = { path = "../core" }
+gstreamer = "0.25"
+zbus = "6"
