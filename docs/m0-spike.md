@@ -55,11 +55,50 @@ for development:
 adb connect <tablet-ip>:<port>   # port from: adb mdns services
 ```
 
+## GNOME RDP extend mode (2026-10-23)
+
+Run with `scripts/m0-rdp-extend.sh start <tablet-ip>`. Client: Microsoft
+Windows App 11.0 for Android.
+
+**Result: black screen.** Login, TLS and session setup work, but no frame
+ever reaches the tablet; the client gives up after about 5 seconds.
+
+What the server log (`G_MESSAGES_DEBUG=all`) shows:
+
+- gnome-remote-desktop sizes the virtual monitor to the tablet (2560×1600)
+  and opens the PipeWire stream, which reaches `paused` and stays there.
+  The layout manager waits in `AWAIT_VIDEO_SIZES` forever.
+- The client does **not** offer H.264 (`AVC420: false`, `AVC444: false`), so
+  even when it works this client gets a CPU-heavier codec.
+- The client supports multi-touch (10 contacts), and the app has touch
+  and mouse pointer modes. Not testable without a picture.
+
+Client setup pitfalls: a gateway set to the host address makes the app ask
+for gateway credentials; a saved account with a mistyped password fails as
+`MIC verification failed` in the server log.
+
+### Root cause (in progress)
+
+`scripts/m0-virtual-monitor.py` takes RDP and the tablet out of the picture:
+it asks Mutter for a virtual monitor and reads it with GStreamer. It hangs
+the same way, and so does recording the built-in screen (`--connector eDP-1`).
+GNOME Shell's stream offers normal formats, but the consumer never appears
+as a PipeWire client.
+
+Likely cause: gnome-shell, mutter and wireplumber were updated during the
+session, and the running processes are the old versions (deleted libraries
+still mapped). To confirm after a reboot.
+
+TabExtend uses the same Mutter virtual-monitor stream, so this check moves
+into `tabextend doctor`: a screencast that cannot deliver a frame must be a
+FAIL, not a PASS based on portal properties alone.
+
 ## To do
 
 - [x] `tabextend doctor`: all checks pass on the reference laptop
+- [ ] Reboot, then rerun `scripts/m0-virtual-monitor.py` (virtual and `--connector eDP-1`)
 - [ ] Throughput + latency under load (iperf3 on the tablet, or a small test app)
-- [ ] GNOME RDP extend mode: glass-to-glass latency, touch behaviour
+- [x] GNOME RDP extend mode: black screen, see above. Retest after the reboot.
 - [ ] TethrLink: latency, pen pressure, does it work over Wi-Fi
 - [ ] Compare `vah264lpenc` vs `vah264enc` vs `nvh264enc`: encode latency, CPU, power draw
 - [ ] Go / no-go
