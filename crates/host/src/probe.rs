@@ -2,7 +2,10 @@
 
 use gst::prelude::*;
 use gstreamer as gst;
-use tabextend_core::encoder::{EncoderProbe, ProbeOutcome};
+use tabextend_core::encoder::{EncoderProbe, EncoderSpec, ProbeOutcome, default_h264_encoders};
+use tabextend_core::stream::default_bitrate;
+
+use crate::pipeline::{apply_settings, encoder_fragment};
 
 /// How long one test encode may take before it counts as failed.
 const PROBE_TIMEOUT_SECS: u64 = 10;
@@ -12,24 +15,46 @@ const PROBE_TIMEOUT_SECS: u64 = 10;
 /// Checking only that the element exists is not enough: Fedora ships
 /// `vah264enc` with an Intel driver that cannot encode H.264, and `nvh264enc`
 /// is present on machines without an NVIDIA GPU.
+///
+/// The test uses the same converter and settings as a real stream, so a
+/// setting an encoder rejects shows up here rather than mid-session.
 pub struct GstProbe {
     width: u32,
     height: u32,
+    known: Vec<EncoderSpec>,
 }
 
 impl GstProbe {
     pub fn new(width: u32, height: u32) -> Result<Self, gst::glib::Error> {
         gst::init()?;
-        Ok(Self { width, height })
+        Ok(Self {
+            width,
+            height,
+            known: default_h264_encoders(),
+        })
     }
 
-    fn run_test_encode(&self, element: &str) -> Result<(), String> {
+    fn spec_for(&self, element: &str) -> EncoderSpec {
+        self.known
+            .iter()
+            .find(|spec| spec.element == element)
+            .cloned()
+            .unwrap_or_else(|| EncoderSpec::custom(element))
+    }
+
+    /// Encode a few frames; on success, return the settings the encoder rejected.
+    fn run_test_encode(&self, element: &str) -> Result<Vec<String>, String> {
+        let spec = self.spec_for(element);
         let description = format!(
             "videotestsrc num-buffers=10 ! video/x-raw,width={},height={},framerate=30/1 \
-             ! videoconvert ! {element} ! fakesink",
-            self.width, self.height
+             ! {} ! fakesink",
+            self.width,
+            self.height,
+            encoder_fragment(&spec)
         );
         let pipeline = gst::parse::launch(&description).map_err(|e| e.to_string())?;
+        let bitrate = default_bitrate(self.width, self.height, 30);
+        let skipped = apply_settings(&pipeline, &spec.settings(bitrate, 30));
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|_| "could not start pipeline".to_owned())?;
@@ -47,7 +72,7 @@ impl GstProbe {
             None => Err(format!("timed out after {PROBE_TIMEOUT_SECS} s")),
         };
         let _ = pipeline.set_state(gst::State::Null);
-        result
+        result.map(|()| skipped)
     }
 }
 
@@ -57,7 +82,8 @@ impl EncoderProbe for GstProbe {
             return ProbeOutcome::Missing;
         }
         match self.run_test_encode(element) {
-            Ok(()) => ProbeOutcome::Works,
+            Ok(skipped) if skipped.is_empty() => ProbeOutcome::Works,
+            Ok(skipped) => ProbeOutcome::Limited(skipped.join(", ")),
             Err(reason) => ProbeOutcome::Failed(reason),
         }
     }

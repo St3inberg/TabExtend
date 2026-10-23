@@ -201,9 +201,14 @@ impl Check for EncoderCheck {
         let working: Vec<_> = self
             .reports
             .iter()
-            .filter(|r| r.outcome == ProbeOutcome::Works)
+            .filter(|r| r.outcome.is_usable())
             .collect();
-        let Some(best) = working.first() else {
+        // Same rule as select_encoder: fully working first, then limited.
+        let best = working
+            .iter()
+            .find(|r| r.outcome == ProbeOutcome::Works)
+            .or(working.first());
+        let Some(best) = best else {
             return Finding::fail(
                 "none working",
                 "Install your GPU's VA-API driver or NVIDIA's driver, or a software encoder \
@@ -217,7 +222,15 @@ impl Check for EncoderCheck {
             best.spec.backend,
             names.join(", ")
         );
-        if best.spec.hardware {
+        if let ProbeOutcome::Limited(limits) = &best.outcome {
+            Finding::warn(
+                summary,
+                format!(
+                    "The best encoder ignores some low-latency settings ({limits}); \
+                     bitrate may vary. Try --encoder with another one from the list below."
+                ),
+            )
+        } else if best.spec.hardware {
             Finding::pass(summary)
         } else {
             Finding::warn(
@@ -362,6 +375,38 @@ mod tests {
         assert_eq!(finding.status, Status::Pass);
         assert!(finding.summary.starts_with("vah264enc"));
         assert!(finding.summary.contains("vah264enc, nvh264enc"));
+    }
+
+    #[test]
+    fn fully_working_encoder_is_preferred_over_a_limited_one_listed_first() {
+        let finding = EncoderCheck {
+            reports: vec![
+                report(
+                    "vah264lpenc",
+                    true,
+                    ProbeOutcome::Limited("cqp only".into()),
+                ),
+                report("vah264enc", true, ProbeOutcome::Works),
+            ],
+        }
+        .evaluate();
+        assert_eq!(finding.status, Status::Pass);
+        assert!(finding.summary.starts_with("vah264enc"));
+        assert!(finding.summary.contains("vah264lpenc, vah264enc"));
+    }
+
+    #[test]
+    fn only_limited_encoders_warn() {
+        let finding = EncoderCheck {
+            reports: vec![report(
+                "vah264lpenc",
+                true,
+                ProbeOutcome::Limited("cqp only".into()),
+            )],
+        }
+        .evaluate();
+        assert_eq!(finding.status, Status::Warn);
+        assert!(finding.hint.unwrap().contains("cqp only"));
     }
 
     #[test]

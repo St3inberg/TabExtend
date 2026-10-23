@@ -3,6 +3,14 @@
 [advisories]
 # Fail on any RustSec advisory, including unmaintained crates.
 yanked = "deny"
+ignore = [
+    # zbus 5's helper crates, merged into zbus 6 rather than abandoned; no
+    # security issue. They come in through ashpd 0.13, which still uses
+    # zbus 5. Remove these when ashpd moves to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; via ashpd" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; via ashpd" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; via ashpd" },
+]
 
 [licenses]
 # Allowed licenses may not all be in use yet; that is fine.

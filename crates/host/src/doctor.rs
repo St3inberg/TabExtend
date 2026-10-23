@@ -89,6 +89,7 @@ fn print_encoders(reports: &[tabextend_core::encoder::ProbeReport]) {
     for report in reports {
         let outcome = match &report.outcome {
             ProbeOutcome::Works => "works".to_owned(),
+            ProbeOutcome::Limited(limits) => format!("works, ignores: {limits}"),
             ProbeOutcome::Missing => "not installed".to_owned(),
             ProbeOutcome::Failed(reason) => format!("failed: {reason}"),
         };

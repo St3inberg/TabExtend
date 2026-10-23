@@ -16,7 +16,20 @@ pub struct EncoderSpec {
     pub backend: String,
     /// Whether the encoder runs on dedicated hardware.
     pub hardware: bool,
+    /// Elements to try, in order, for converting captured frames into what the
+    /// encoder takes. The first one installed is used; `videoconvert` is the
+    /// CPU fallback that always works.
+    pub converters: Vec<String>,
+    /// Fixed low-latency settings as (property, value). Properties the
+    /// installed element does not have are skipped.
+    pub tuning: Vec<(String, String)>,
+    /// Bitrate property and how many bits per second one unit of it is.
+    pub bitrate: Option<(String, u32)>,
+    /// Property for the maximum distance between keyframes, in frames.
+    pub keyframe_interval: Option<String>,
 }
+
+const CPU_CONVERTER: &str = "videoconvert";
 
 impl EncoderSpec {
     pub fn new(element: &str, backend: &str, hardware: bool) -> Self {
@@ -24,7 +37,52 @@ impl EncoderSpec {
             element: element.to_owned(),
             backend: backend.to_owned(),
             hardware,
+            converters: vec![CPU_CONVERTER.to_owned()],
+            tuning: Vec::new(),
+            bitrate: None,
+            keyframe_interval: None,
         }
+    }
+
+    /// Prefer this converter (a gst-launch fragment) over the CPU fallback.
+    fn converter(mut self, fragment: &str) -> Self {
+        self.converters
+            .insert(self.converters.len() - 1, fragment.to_owned());
+        self
+    }
+
+    fn tune(mut self, settings: &[(&str, &str)]) -> Self {
+        self.tuning.extend(
+            settings
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        self
+    }
+
+    fn bitrate_property(mut self, name: &str, bits_per_unit: u32) -> Self {
+        self.bitrate = Some((name.to_owned(), bits_per_unit));
+        self
+    }
+
+    fn keyframe_property(mut self, name: &str) -> Self {
+        self.keyframe_interval = Some(name.to_owned());
+        self
+    }
+
+    /// Every property to set for a stream, as (property, value).
+    pub fn settings(&self, bitrate_bps: u32, keyframe_interval: u32) -> Vec<(String, String)> {
+        let mut settings = self.tuning.clone();
+        if let Some((name, bits_per_unit)) = &self.bitrate {
+            settings.push((
+                name.clone(),
+                (bitrate_bps / bits_per_unit).max(1).to_string(),
+            ));
+        }
+        if let Some(name) = &self.keyframe_interval {
+            settings.push((name.clone(), keyframe_interval.to_string()));
+        }
+        settings
     }
 
     /// A spec for an element the user named that is not on the built-in list.
@@ -37,14 +95,54 @@ impl EncoderSpec {
 ///
 /// Low-power VA-API comes before regular VA-API because it uses a fixed-function
 /// block with lower latency and power. Hardware encoders come before software.
+///
+/// Settings favour latency over compression: no B-frames (they make the
+/// decoder wait for later frames), constant bitrate, fastest presets.
 pub fn default_h264_encoders() -> Vec<EncoderSpec> {
+    let va = |element: &str, backend: &str| {
+        EncoderSpec::new(element, backend, true)
+            .converter("vapostproc")
+            .tune(&[
+                ("rate-control", "cbr"),
+                ("b-frames", "0"),
+                ("target-usage", "7"),
+            ])
+            .bitrate_property("bitrate", 1000)
+            .keyframe_property("key-int-max")
+    };
     vec![
-        EncoderSpec::new("vah264lpenc", "VA-API low-power (Intel)", true),
-        EncoderSpec::new("vah264enc", "VA-API (Intel/AMD)", true),
-        EncoderSpec::new("nvh264enc", "NVENC (NVIDIA)", true),
-        EncoderSpec::new("qsvh264enc", "Quick Sync (Intel)", true),
-        EncoderSpec::new("x264enc", "x264 (software)", false),
-        EncoderSpec::new("openh264enc", "OpenH264 (software)", false),
+        va("vah264lpenc", "VA-API low-power (Intel)"),
+        va("vah264enc", "VA-API (Intel/AMD)"),
+        EncoderSpec::new("nvh264enc", "NVENC (NVIDIA)", true)
+            .converter("cudaupload ! cudaconvert")
+            .tune(&[
+                ("tune", "ultra-low-latency"),
+                ("zerolatency", "true"),
+                ("bframes", "0"),
+                ("rc-mode", "cbr"),
+            ])
+            .bitrate_property("bitrate", 1000)
+            .keyframe_property("gop-size"),
+        EncoderSpec::new("qsvh264enc", "Quick Sync (Intel)", true)
+            .tune(&[
+                ("b-frames", "0"),
+                ("target-usage", "7"),
+                ("rate-control", "cbr"),
+            ])
+            .bitrate_property("bitrate", 1000)
+            .keyframe_property("gop-size"),
+        EncoderSpec::new("x264enc", "x264 (software)", false)
+            .tune(&[
+                ("tune", "zerolatency"),
+                ("speed-preset", "ultrafast"),
+                ("bframes", "0"),
+            ])
+            .bitrate_property("bitrate", 1000)
+            .keyframe_property("key-int-max"),
+        EncoderSpec::new("openh264enc", "OpenH264 (software)", false)
+            .tune(&[("complexity", "low"), ("rate-control", "bitrate")])
+            .bitrate_property("bitrate", 1)
+            .keyframe_property("gop-size"),
     ]
 }
 
@@ -57,6 +155,16 @@ pub enum ProbeOutcome {
     Failed(String),
     /// The element encoded a test stream.
     Works,
+    /// It encoded, but rejected some of its low-latency settings (e.g. a
+    /// driver that has no constant-bitrate mode). Usable, ranked after
+    /// encoders that took every setting.
+    Limited(String),
+}
+
+impl ProbeOutcome {
+    pub fn is_usable(&self) -> bool {
+        matches!(self, Self::Works | Self::Limited(_))
+    }
 }
 
 /// Something that can tell whether an encoder works on this machine.
@@ -76,7 +184,7 @@ pub struct ProbeReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectError {
     /// The encoder the user asked for does not work.
-    PreferredUnavailable(ProbeReport),
+    PreferredUnavailable(Box<ProbeReport>),
     /// None of the candidates work.
     NoneAvailable(Vec<ProbeReport>),
 }
@@ -91,7 +199,9 @@ impl fmt::Display for SelectError {
                 ProbeOutcome::Failed(reason) => {
                     write!(f, "encoder `{}` failed: {reason}", report.spec.element)
                 }
-                ProbeOutcome::Works => unreachable!("a working encoder is not an error"),
+                ProbeOutcome::Works | ProbeOutcome::Limited(_) => {
+                    unreachable!("a usable encoder is not an error")
+                }
             },
             SelectError::NoneAvailable(_) => write!(f, "no working H.264 encoder found"),
         }
@@ -116,7 +226,7 @@ pub fn probe_all(probe: &dyn EncoderProbe, candidates: &[EncoderSpec]) -> Vec<Pr
 /// With `preferred`, only that element is tried and there is no silent
 /// fallback: if the user asked for NVENC and it is broken, they should know.
 /// Without it, candidates are tried in order and probing stops at the first
-/// one that works.
+/// one that fully works; if none does, the first limited one is used.
 pub fn select_encoder(
     probe: &dyn EncoderProbe,
     candidates: &[EncoderSpec],
@@ -129,11 +239,11 @@ pub fn select_encoder(
             .cloned()
             .unwrap_or_else(|| EncoderSpec::custom(element));
         return match probe.probe(element) {
-            ProbeOutcome::Works => Ok(spec),
-            outcome => Err(SelectError::PreferredUnavailable(ProbeReport {
+            outcome if outcome.is_usable() => Ok(spec),
+            outcome => Err(SelectError::PreferredUnavailable(Box::new(ProbeReport {
                 spec,
                 outcome,
-            })),
+            }))),
         };
     }
 
@@ -148,7 +258,10 @@ pub fn select_encoder(
             outcome,
         });
     }
-    Err(SelectError::NoneAvailable(tried))
+    match tried.iter().find(|r| r.outcome.is_usable()) {
+        Some(limited) => Ok(limited.spec.clone()),
+        None => Err(SelectError::NoneAvailable(tried)),
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +307,39 @@ mod tests {
         ]);
         let chosen = select_encoder(&probe, &default_h264_encoders(), None).unwrap();
         assert_eq!(chosen.element, "nvh264enc");
+    }
+
+    #[test]
+    fn fully_working_encoder_beats_a_limited_one_ranked_higher() {
+        let probe = FakeProbe::new(&[
+            (
+                "vah264lpenc",
+                ProbeOutcome::Limited("rate-control=cbr rejected".into()),
+            ),
+            ("vah264enc", ProbeOutcome::Works),
+        ]);
+        let chosen = select_encoder(&probe, &default_h264_encoders(), None).unwrap();
+        assert_eq!(chosen.element, "vah264enc");
+    }
+
+    #[test]
+    fn limited_encoder_is_used_when_nothing_fully_works() {
+        let probe = FakeProbe::new(&[
+            ("nvh264enc", ProbeOutcome::Limited("tune rejected".into())),
+            (
+                "openh264enc",
+                ProbeOutcome::Limited("complexity rejected".into()),
+            ),
+        ]);
+        let chosen = select_encoder(&probe, &default_h264_encoders(), None).unwrap();
+        assert_eq!(chosen.element, "nvh264enc");
+    }
+
+    #[test]
+    fn limited_preferred_encoder_is_accepted() {
+        let probe = FakeProbe::new(&[("vah264lpenc", ProbeOutcome::Limited("cqp only".into()))]);
+        let chosen = select_encoder(&probe, &default_h264_encoders(), Some("vah264lpenc")).unwrap();
+        assert_eq!(chosen.element, "vah264lpenc");
     }
 
     #[test]
@@ -264,6 +410,59 @@ mod tests {
         let reports = probe_all(&probe, &default_h264_encoders());
         assert_eq!(reports.len(), default_h264_encoders().len());
         assert_eq!(reports[0].outcome, ProbeOutcome::Works);
+    }
+
+    #[test]
+    fn bitrate_is_converted_to_each_encoders_unit() {
+        let encoders = default_h264_encoders();
+        let find = |name: &str| encoders.iter().find(|s| s.element == name).unwrap();
+        let value = |spec: &EncoderSpec, key: &str| {
+            spec.settings(20_000_000, 120)
+                .into_iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v)
+        };
+        assert_eq!(
+            value(find("vah264enc"), "bitrate").as_deref(),
+            Some("20000")
+        );
+        assert_eq!(
+            value(find("openh264enc"), "bitrate").as_deref(),
+            Some("20000000")
+        );
+        assert_eq!(value(find("nvh264enc"), "gop-size").as_deref(), Some("120"));
+    }
+
+    #[test]
+    fn every_encoder_disables_b_frames_or_is_low_latency_by_design() {
+        // openh264 has no B-frames at all.
+        for spec in default_h264_encoders() {
+            let has = |k: &str| spec.tuning.iter().any(|(key, _)| key == k);
+            assert!(
+                has("b-frames") || has("bframes") || spec.element == "openh264enc",
+                "{} may produce B-frames",
+                spec.element
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_converter_is_always_the_last_resort() {
+        for spec in default_h264_encoders() {
+            assert_eq!(
+                spec.converters.last().map(String::as_str),
+                Some(CPU_CONVERTER)
+            );
+        }
+        let va = &default_h264_encoders()[0];
+        assert_eq!(va.converters, ["vapostproc", "videoconvert"]);
+    }
+
+    #[test]
+    fn custom_encoders_get_no_guessed_settings() {
+        let spec = EncoderSpec::custom("v4l2h264enc");
+        assert!(spec.settings(10_000_000, 60).is_empty());
+        assert_eq!(spec.converters, ["videoconvert"]);
     }
 
     #[test]
