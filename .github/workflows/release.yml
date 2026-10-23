@@ -1,0 +1,50 @@
+name: Release
+
+# Attaches the Linux host program to a published release. The Android APK
+# is signed and attached by hand until signing moves to CI (issue #9).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  linux-host:
+    # An older Ubuntu, so the binary runs on distributions with older glibc.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Build
+        run: cargo build --release --locked -p tabextend-host
+
+      - name: Package
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          name="tabextend-${VERSION}-linux-x86_64"
+          mkdir "$name"
+          cp target/release/tabextend LICENSE README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$VERSION" \
+            "tabextend-${VERSION}-linux-x86_64.tar.gz" \
+            "tabextend-${VERSION}-linux-x86_64.tar.gz.sha256"

@@ -9,7 +9,13 @@ windows onto it, and use touch and pen on it. No cable needed.
 > Wi-Fi; touch input is blocked by a portal limitation with a known way
 > around it. Details in [docs/status.md](docs/status.md).
 
-## Quick start
+## Install
+
+Download the tablet app and the laptop program from
+[Releases](https://github.com/St3inberg/TabExtend/releases), then follow
+[Install a release](docs/setup.md#install-a-release-no-building).
+
+Or build from source:
 
 ```sh
 git clone https://github.com/St3inberg/TabExtend.git
@@ -18,8 +24,8 @@ cargo build --release
 ./target/release/tabextend doctor
 ```
 
-You need GStreamer and a video encoder installed first. The
-[setup tutorial](docs/setup.md) covers Fedora, Ubuntu and Arch.
+The [setup tutorial](docs/setup.md) covers GStreamer and video drivers on
+Fedora, Ubuntu and Arch.
 
 ## How it works
 

@@ -1,12 +1,11 @@
 # Setting up TabExtend
 
-This tutorial gets a laptop ready to run TabExtend and checks it with
-`tabextend doctor`.
+This tutorial gets a laptop and a tablet ready to use TabExtend: from a
+release download, or built from source.
 
-> **Status:** TabExtend is in its first milestone. Today it builds the
-> `tabextend doctor` command, which tells you whether your machine can run
-> TabExtend and what to install if not. Streaming and the tablet app come in
-> the next milestones; this guide will grow with them.
+> **Status: work in progress.** The tablet works as an extended screen over
+> Wi-Fi. Touch and pen input do not work yet ([#1](https://github.com/St3inberg/TabExtend/issues/1));
+> see [status.md](status.md).
 
 ## What you need
 
@@ -15,6 +14,49 @@ This tutorial gets a laptop ready to run TabExtend and checks it with
   you.
 - An **Android tablet**, Android 11 or later.
 - Both on the same Wi-Fi network. No cable is needed.
+
+## Install a release (no building)
+
+Downloads are on the [Releases page](https://github.com/St3inberg/TabExtend/releases).
+Early releases are pre-releases: read the notes for what works.
+
+**On the tablet** (Android 11 or later, any brand):
+
+1. Download `tabextend-<version>.apk` on the tablet.
+2. Open it. Android asks to allow installs from your browser or file app;
+   allow it for this one install.
+3. To check the download is genuine, compare the signing certificate in the
+   release notes with what `apksigner verify --print-certs` reports.
+
+If you installed a build from source before, uninstall it first: releases
+are signed with a different key, so Android will not update over it. You
+will need to pair again.
+
+**On the laptop** (GNOME on Wayland, x86-64):
+
+1. Install GStreamer and your GPU's video driver: steps 1 and 2 below
+   (the runtime packages are enough; skip `-devel`/`-dev` and the Rust tools).
+2. Download `tabextend-<version>-linux-x86_64.tar.gz` and check it:
+
+   ```sh
+   sha256sum -c tabextend-<version>-linux-x86_64.tar.gz.sha256
+   tar xzf tabextend-<version>-linux-x86_64.tar.gz
+   cd tabextend-<version>-linux-x86_64
+   ./tabextend doctor
+   ```
+
+3. Pair and connect:
+
+   ```sh
+   ./tabextend pair
+   ```
+
+   Scan the QR code with the tablet's camera (or copy the link and use
+   "Paste pairing link" in the app). The first time, GNOME asks to share the
+   screen: turn on **Allow remote interaction**, then share. Afterwards,
+   `./tabextend serve` is enough.
+
+## Build from source
 
 ## 1. Install the build tools and GStreamer
 

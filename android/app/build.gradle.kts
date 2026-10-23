@@ -16,9 +16,28 @@ android {
         versionName = "0.1.0"
     }
 
+    // Release signing key from the environment, never from the repo:
+    //   TABEXTEND_KEYSTORE=/path/release.p12
+    //   TABEXTEND_KEYSTORE_PASSWORD_FILE=/path/password
+    // Without them, release builds are unsigned.
+    val keystore = providers.environmentVariable("TABEXTEND_KEYSTORE").orNull
+    val passwordFile = providers.environmentVariable("TABEXTEND_KEYSTORE_PASSWORD_FILE").orNull
+    if (keystore != null && passwordFile != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(keystore)
+                storeType = "pkcs12"
+                storePassword = file(passwordFile).readText().trim()
+                keyAlias = "tabextend"
+                keyPassword = storePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
