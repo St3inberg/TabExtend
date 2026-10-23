@@ -1,5 +1,6 @@
 //! The GStreamer pipeline: captured frames in, H.264 access units out.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gst::prelude::*;
@@ -20,6 +21,13 @@ pub fn converter_for(spec: &EncoderSpec) -> &str {
                 .all(|name| gst::ElementFactory::find(name).is_some())
         })
         .map_or("videoconvert", String::as_str)
+}
+
+/// Can this encoder chain take frames as GPU buffers (DMA-BUF) straight from
+/// the compositor? Then no frame is copied through system memory. Only the
+/// VA-API converter imports them; other chains get copied frames.
+pub fn accepts_gpu_buffers(spec: &EncoderSpec) -> bool {
+    converter_for(spec) == "vapostproc"
 }
 
 /// `converter ! encoder name=encoder`, for the middle of a pipeline.
@@ -70,6 +78,7 @@ pub struct StreamConfig {
 pub struct EncodePipeline {
     pipeline: gst::Element,
     sink: gst::Element,
+    captured: Arc<AtomicU64>,
 }
 
 impl EncodePipeline {
@@ -86,7 +95,7 @@ impl EncodePipeline {
         // queue leaky=downstream: if the encoder falls behind, drop raw
         // frames rather than build up latency in front of it.
         let description = format!(
-            "{source} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream \
+            "{source} ! queue name=capture max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream \
              ! {} ! h264parse config-interval=-1 \
              ! video/x-h264,stream-format=byte-stream,alignment=au \
              ! appsink name=sink sync=false max-buffers=2 drop=true",
@@ -98,6 +107,21 @@ impl EncodePipeline {
             &spec.settings(config.bitrate_bps, config.keyframe_interval),
         ) {
             eprintln!("note: {}: {skipped}", spec.element);
+        }
+
+        // Count frames as they arrive from the capture source, before any
+        // dropping, to tell a slow compositor from a slow encoder.
+        let captured = Arc::new(AtomicU64::new(0));
+        if let Some(pad) = pipeline
+            .downcast_ref::<gst::Bin>()
+            .and_then(|bin| bin.by_name("capture"))
+            .and_then(|queue| queue.static_pad("sink"))
+        {
+            let captured = captured.clone();
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                captured.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
         }
 
         // appsink through its signals, so no gstreamer-app development
@@ -142,7 +166,16 @@ impl EncodePipeline {
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|_| "pipeline failed to start".to_owned())?;
-        Ok(Self { pipeline, sink })
+        Ok(Self {
+            pipeline,
+            sink,
+            captured,
+        })
+    }
+
+    /// Frames received from the capture source so far.
+    pub fn captured_frames(&self) -> u64 {
+        self.captured.load(Ordering::Relaxed)
     }
 
     /// Ask the encoder for a keyframe, with SPS/PPS, as soon as possible.

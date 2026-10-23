@@ -12,8 +12,8 @@ use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use tabextend_core::encoder::{default_h264_encoders, select_encoder};
 use tabextend_core::pairing::{Fingerprint, PairingWindow};
 use tabextend_core::protocol::{
-    DisplayInfo, HEADER_LEN, Message, PAIRING_TOKEN_LEN, PROTOCOL_VERSION, RejectReason,
-    check_length,
+    DisplayInfo, HEADER_LEN, Message, PAIRING_TOKEN_LEN, PROTOCOL_VERSION, PairingRequest,
+    RejectReason, check_length,
 };
 use tabextend_host::capture::TestPattern;
 use tabextend_host::identity::{HostIdentity, PairedStore, fingerprint};
@@ -173,7 +173,7 @@ impl Client {
     async fn hello(&mut self, token: Option<[u8; PAIRING_TOKEN_LEN]>) {
         self.send(&Message::Hello {
             version: PROTOCOL_VERSION,
-            pairing_token: token,
+            pairing: token.map_or(PairingRequest::None, PairingRequest::Token),
             device_name: "test tablet".into(),
             display: DisplayInfo {
                 width: 640,

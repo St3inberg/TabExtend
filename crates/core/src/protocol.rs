@@ -24,6 +24,8 @@ pub const MAX_CONTROL_MESSAGE: usize = 4096;
 pub const MAX_NAME: usize = 64;
 /// Length of a pairing token, in bytes.
 pub const PAIRING_TOKEN_LEN: usize = 16;
+/// Length of a pairing nonce and of a commitment to one, in bytes.
+pub const NONCE_LEN: usize = 32;
 
 /// What a tablet's screen can show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,21 @@ pub enum RejectReason {
     BadPairingToken = 3,
     Busy = 4,
     CaptureFailed = 5,
+    /// The user declined the pairing on the computer, or it timed out.
+    PairingDenied = 6,
+}
+
+/// How a tablet asks to be trusted, if it is not paired yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairingRequest {
+    /// Already paired: the certificate is enough.
+    None,
+    /// The single-use token from the host's QR code.
+    Token([u8; PAIRING_TOKEN_LEN]),
+    /// Found by scanning: both sides show a code and the user confirms on
+    /// the computer. Carries the commitment to the tablet's nonce; see
+    /// `pairing::confirmation_code`.
+    Confirm { commitment: [u8; NONCE_LEN] },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,8 +73,7 @@ pub enum Message {
     /// Client → host, first message on every connection.
     Hello {
         version: u16,
-        /// Present only when pairing.
-        pairing_token: Option<[u8; PAIRING_TOKEN_LEN]>,
+        pairing: PairingRequest,
         device_name: String,
         display: DisplayInfo,
     },
@@ -90,6 +106,14 @@ pub enum Message {
     },
     /// Client → host: the decoder lost its place; send a keyframe.
     RequestKeyframe,
+    /// Host → client, during confirm pairing: the host's random nonce.
+    PairChallenge {
+        nonce: [u8; NONCE_LEN],
+    },
+    /// Client → host, after the challenge: the nonce it committed to.
+    PairReveal {
+        nonce: [u8; NONCE_LEN],
+    },
 }
 
 mod tag {
@@ -100,6 +124,8 @@ mod tag {
     pub const PING: u8 = 5;
     pub const PONG: u8 = 6;
     pub const REQUEST_KEYFRAME: u8 = 7;
+    pub const PAIR_CHALLENGE: u8 = 8;
+    pub const PAIR_REVEAL: u8 = 9;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,9 +173,14 @@ pub const HEADER_LEN: usize = 4;
 pub fn max_length(tag: u8) -> Result<usize, ProtocolError> {
     match tag {
         tag::VIDEO => Ok(1 + MAX_VIDEO_FRAME + 9),
-        tag::HELLO | tag::WELCOME | tag::REJECT | tag::PING | tag::PONG | tag::REQUEST_KEYFRAME => {
-            Ok(MAX_CONTROL_MESSAGE)
-        }
+        tag::HELLO
+        | tag::WELCOME
+        | tag::REJECT
+        | tag::PING
+        | tag::PONG
+        | tag::REQUEST_KEYFRAME
+        | tag::PAIR_CHALLENGE
+        | tag::PAIR_REVEAL => Ok(MAX_CONTROL_MESSAGE),
         other => Err(ProtocolError::UnknownTag(other)),
     }
 }
@@ -174,18 +205,22 @@ impl Message {
         match self {
             Message::Hello {
                 version,
-                pairing_token,
+                pairing,
                 device_name,
                 display,
             } => {
                 body.u8(tag::HELLO);
                 body.u16(*version);
-                match pairing_token {
-                    Some(token) => {
+                match pairing {
+                    PairingRequest::None => body.u8(0),
+                    PairingRequest::Token(token) => {
                         body.u8(1);
                         body.bytes(token);
                     }
-                    None => body.u8(0),
+                    PairingRequest::Confirm { commitment } => {
+                        body.u8(2);
+                        body.bytes(commitment);
+                    }
                 }
                 body.string(device_name);
                 body.u32(display.width);
@@ -231,6 +266,14 @@ impl Message {
                 body.u64(*sent_us);
             }
             Message::RequestKeyframe => body.u8(tag::REQUEST_KEYFRAME),
+            Message::PairChallenge { nonce } => {
+                body.u8(tag::PAIR_CHALLENGE);
+                body.bytes(nonce);
+            }
+            Message::PairReveal { nonce } => {
+                body.u8(tag::PAIR_REVEAL);
+                body.bytes(nonce);
+            }
         }
         let body = body.0;
         let mut out = Vec::with_capacity(HEADER_LEN + body.len());
@@ -247,12 +290,15 @@ impl Message {
         let message = match tag {
             tag::HELLO => {
                 let version = r.u16()?;
-                let pairing_token = match r.u8()? {
-                    0 => None,
-                    1 => Some(r.array::<PAIRING_TOKEN_LEN>()?),
+                let pairing = match r.u8()? {
+                    0 => PairingRequest::None,
+                    1 => PairingRequest::Token(r.array()?),
+                    2 => PairingRequest::Confirm {
+                        commitment: r.array()?,
+                    },
                     value => {
                         return Err(ProtocolError::UnknownValue {
-                            field: "token flag",
+                            field: "pairing mode",
                             value,
                         });
                     }
@@ -266,7 +312,7 @@ impl Message {
                 };
                 Message::Hello {
                     version,
-                    pairing_token,
+                    pairing,
                     device_name,
                     display,
                 }
@@ -292,6 +338,7 @@ impl Message {
                     3 => RejectReason::BadPairingToken,
                     4 => RejectReason::Busy,
                     5 => RejectReason::CaptureFailed,
+                    6 => RejectReason::PairingDenied,
                     value => {
                         return Err(ProtocolError::UnknownValue {
                             field: "reject reason",
@@ -315,6 +362,8 @@ impl Message {
                 sent_us: r.u64()?,
             },
             tag::REQUEST_KEYFRAME => Message::RequestKeyframe,
+            tag::PAIR_CHALLENGE => Message::PairChallenge { nonce: r.array()? },
+            tag::PAIR_REVEAL => Message::PairReveal { nonce: r.array()? },
             other => return Err(ProtocolError::UnknownTag(other)),
         };
         if !r.0.is_empty() {
@@ -417,13 +466,13 @@ mod tests {
         vec![
             Message::Hello {
                 version: PROTOCOL_VERSION,
-                pairing_token: Some([7; PAIRING_TOKEN_LEN]),
+                pairing: PairingRequest::Token([7; PAIRING_TOKEN_LEN]),
                 device_name: "Idea Tab ✓".into(),
                 display: display(),
             },
             Message::Hello {
                 version: PROTOCOL_VERSION,
-                pairing_token: None,
+                pairing: PairingRequest::None,
                 device_name: String::new(),
                 display: display(),
             },
@@ -456,6 +505,24 @@ mod tests {
                 sent_us: 123,
             },
             Message::RequestKeyframe,
+            Message::Hello {
+                version: PROTOCOL_VERSION,
+                pairing: PairingRequest::Confirm {
+                    commitment: [9; NONCE_LEN],
+                },
+                device_name: "tab".into(),
+                display: display(),
+            },
+            Message::PairChallenge {
+                nonce: [1; NONCE_LEN],
+            },
+            Message::PairReveal {
+                nonce: [2; NONCE_LEN],
+            },
+            Message::Reject {
+                reason: RejectReason::PairingDenied,
+                detail: String::new(),
+            },
         ]
     }
 

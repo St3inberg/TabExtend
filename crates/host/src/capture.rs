@@ -27,9 +27,11 @@ pub trait CaptureBackend: Send + Sync {
     fn start(&self, width: u32, height: u32) -> BoxFuture<'_, Result<Box<dyn Capture>, String>>;
 }
 
-pub trait Capture: Send {
+pub trait Capture: Send + Sync {
     /// The gst-launch fragment producing raw video at the requested size.
-    fn source(&self) -> String;
+    /// With `gpu_buffers`, frames stay in GPU memory (DMA-BUF) where the
+    /// source can do that.
+    fn source(&self, gpu_buffers: bool) -> String;
     /// Release the surface (for a virtual monitor: remove it from GNOME).
     fn stop(self: Box<Self>) -> BoxFuture<'static, ()>;
 }
@@ -51,7 +53,8 @@ impl CaptureBackend for TestPattern {
 }
 
 impl Capture for TestPatternCapture {
-    fn source(&self) -> String {
+    /// videotestsrc draws in system memory; the GPU flag does not apply.
+    fn source(&self, _gpu_buffers: bool) -> String {
         format!(
             "videotestsrc is-live=true pattern=ball ! video/x-raw,width={},height={},framerate=60/1",
             self.width, self.height
@@ -175,13 +178,20 @@ struct PortalCapture {
 }
 
 impl Capture for PortalCapture {
-    fn source(&self) -> String {
+    fn source(&self, gpu_buffers: bool) -> String {
         // The size caps make Mutter create the virtual monitor at the
         // tablet's size. keepalive-time resends the last frame when nothing
         // on screen changes, so a static desktop still produces frames.
+        // Without GPU buffers, Mutter reads every frame back into system
+        // memory, which costs frame rate at large sizes.
+        let (memory, copy) = if gpu_buffers {
+            ("(memory:DMABuf)", "")
+        } else {
+            ("", " always-copy=true")
+        };
         format!(
-            "pipewiresrc fd={} path={} always-copy=true keepalive-time=500 \
-             ! video/x-raw,width={},height={}",
+            "pipewiresrc fd={} path={}{copy} keepalive-time=500 \
+             ! video/x-raw{memory},width={},height={}",
             self.fd.as_raw_fd(),
             self.node,
             self.width,

@@ -7,12 +7,16 @@
 //! tablet's certificate fingerprint in [`PairedDevices`]. Later connections
 //! need no token: both sides check the other's pinned certificate.
 //!
-//! See docs/security.md for the reasoning.
+//! The other way in is scanning: the tablet finds the host over mDNS, both
+//! show a 6-digit [`confirmation_code`], and the user approves on the
+//! computer. See docs/security.md for the reasoning.
 
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use crate::protocol::{MAX_NAME, PAIRING_TOKEN_LEN};
+use sha2::{Digest, Sha256};
+
+use crate::protocol::{MAX_NAME, NONCE_LEN, PAIRING_TOKEN_LEN};
 
 /// How long a pairing token stays valid.
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(120);
@@ -146,6 +150,30 @@ impl PairingWindow {
         !self.used && self.failures < MAX_PAIRING_FAILURES && now < self.expires_at
     }
 
+    /// Can a scanning tablet ask for confirmation right now?
+    pub fn check_open(&self, now: Instant) -> Result<(), PairingError> {
+        if self.used {
+            Err(PairingError::AlreadyUsed)
+        } else if self.failures >= MAX_PAIRING_FAILURES {
+            Err(PairingError::TooManyFailures)
+        } else if now >= self.expires_at {
+            Err(PairingError::Expired)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record how a confirmation ended. Approval closes the window like a
+    /// redeemed token; a refusal counts toward the failure limit, so a
+    /// stranger cannot keep popping up requests.
+    pub fn finish_confirmation(&mut self, approved: bool) {
+        if approved {
+            self.used = true;
+        } else {
+            self.failures += 1;
+        }
+    }
+
     /// Check a presented token. On success the window closes for good.
     pub fn redeem(&mut self, presented: &PairingToken, now: Instant) -> Result<(), PairingError> {
         if self.used {
@@ -168,6 +196,45 @@ impl PairingWindow {
         self.used = true;
         Ok(())
     }
+}
+
+/// What the tablet sends first in confirm pairing: a hash of its secret
+/// nonce. It reveals the nonce only after seeing the host's, so a machine in
+/// the middle cannot choose keys or nonces to make two codes match; it gets
+/// one blind guess in a million.
+pub fn commitment(nonce: &[u8; NONCE_LEN]) -> [u8; NONCE_LEN] {
+    let mut hash = Sha256::new();
+    hash.update(b"tabextend commitment v1");
+    hash.update(nonce);
+    hash.finalize().into()
+}
+
+/// Does a revealed nonce match the commitment sent earlier?
+pub fn commitment_matches(commitment: &[u8; NONCE_LEN], nonce: &[u8; NONCE_LEN]) -> bool {
+    constant_time_eq(commitment, &self::commitment(nonce))
+}
+
+/// The 6-digit code both screens show. It covers both certificates and both
+/// nonces, so if anything sat between the devices, the codes differ.
+pub fn confirmation_code(
+    host: &Fingerprint,
+    client: &Fingerprint,
+    host_nonce: &[u8; NONCE_LEN],
+    client_nonce: &[u8; NONCE_LEN],
+) -> u32 {
+    let mut hash = Sha256::new();
+    hash.update(b"tabextend confirmation v1");
+    hash.update(host.0);
+    hash.update(client.0);
+    hash.update(host_nonce);
+    hash.update(client_nonce);
+    let digest = hash.finalize();
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000
+}
+
+/// `123 456`: easier to compare at a glance.
+pub fn format_code(code: u32) -> String {
+    format!("{:03} {:03}", code / 1000, code % 1000)
 }
 
 /// Compare without stopping at the first difference, so timing does not
@@ -371,6 +438,91 @@ mod tests {
             Err(PairingError::TooManyFailures)
         );
         assert!(!window.is_open(now));
+    }
+
+    #[test]
+    fn confirmation_code_known_vector() {
+        // Same vector as PairingCodeTest.kt on the tablet.
+        let code = confirmation_code(
+            &Fingerprint([1; 32]),
+            &Fingerprint([2; 32]),
+            &[3; NONCE_LEN],
+            &[4; NONCE_LEN],
+        );
+        assert_eq!(format_code(code), "778 062");
+        assert_eq!(
+            hex(&commitment(&[5; NONCE_LEN])),
+            "0db0815fb87772ab13658c18214590e48ab9889ab1aa2f09db39ec051393bb7d"
+        );
+    }
+
+    #[test]
+    fn code_changes_with_every_input() {
+        let base = (Fingerprint([1; 32]), Fingerprint([2; 32]), [3; 32], [4; 32]);
+        let code = |h: &Fingerprint, c: &Fingerprint, hn: &[u8; 32], cn: &[u8; 32]| {
+            confirmation_code(h, c, hn, cn)
+        };
+        let reference = code(&base.0, &base.1, &base.2, &base.3);
+        assert_ne!(
+            reference,
+            code(&Fingerprint([9; 32]), &base.1, &base.2, &base.3)
+        );
+        assert_ne!(
+            reference,
+            code(&base.0, &Fingerprint([9; 32]), &base.2, &base.3)
+        );
+        assert_ne!(reference, code(&base.0, &base.1, &[9; 32], &base.3));
+        assert_ne!(reference, code(&base.0, &base.1, &base.2, &[9; 32]));
+        // Swapping host and client is a different code, not the same one.
+        assert_ne!(reference, code(&base.1, &base.0, &base.2, &base.3));
+    }
+
+    #[test]
+    fn commitment_binds_the_nonce() {
+        let c = commitment(&[5; NONCE_LEN]);
+        assert!(commitment_matches(&c, &[5; NONCE_LEN]));
+        assert!(!commitment_matches(&c, &[6; NONCE_LEN]));
+    }
+
+    #[test]
+    fn codes_always_have_six_digits() {
+        assert_eq!(format_code(0), "000 000");
+        assert_eq!(format_code(42), "000 042");
+        assert_eq!(format_code(999_999), "999 999");
+    }
+
+    #[test]
+    fn approved_confirmation_closes_the_window() {
+        let now = Instant::now();
+        let mut window = PairingWindow::open([5; PAIRING_TOKEN_LEN], now);
+        assert_eq!(window.check_open(now), Ok(()));
+        window.finish_confirmation(true);
+        assert_eq!(window.check_open(now), Err(PairingError::AlreadyUsed));
+        assert_eq!(
+            window.redeem(&[5; PAIRING_TOKEN_LEN], now),
+            Err(PairingError::AlreadyUsed)
+        );
+    }
+
+    #[test]
+    fn refused_confirmations_count_as_failures() {
+        let now = Instant::now();
+        let mut window = PairingWindow::open([5; PAIRING_TOKEN_LEN], now);
+        for _ in 0..MAX_PAIRING_FAILURES {
+            assert_eq!(window.check_open(now), Ok(()));
+            window.finish_confirmation(false);
+        }
+        assert_eq!(window.check_open(now), Err(PairingError::TooManyFailures));
+    }
+
+    #[test]
+    fn confirmation_respects_expiry() {
+        let now = Instant::now();
+        let window = PairingWindow::open([5; PAIRING_TOKEN_LEN], now);
+        assert_eq!(
+            window.check_open(now + PAIRING_WINDOW),
+            Err(PairingError::Expired)
+        );
     }
 
     #[test]

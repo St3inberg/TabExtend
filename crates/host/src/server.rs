@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use tabextend_core::encoder::EncoderSpec;
 use tabextend_core::pairing::{Fingerprint, PairingWindow};
 use tabextend_core::protocol::{
-    Codec, HEADER_LEN, MAX_CONTROL_MESSAGE, Message, PROTOCOL_VERSION, RejectReason, check_length,
+    Codec, HEADER_LEN, MAX_CONTROL_MESSAGE, Message, PROTOCOL_VERSION, PairingRequest,
+    RejectReason, check_length,
 };
 use tabextend_core::stream::{FrameDecision, FrameGate, default_bitrate, stream_size};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -24,9 +25,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 
-use crate::capture::CaptureBackend;
+use crate::capture::{Capture, CaptureBackend};
 use crate::identity::{HostIdentity, PairedStore, fingerprint};
-use crate::pipeline::{EncodePipeline, EncodedFrame, StreamConfig};
+use crate::pipeline::{EncodePipeline, EncodedFrame, StreamConfig, accepts_gpu_buffers};
 use crate::tls;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -105,7 +106,7 @@ impl Server {
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello"))??;
         let Message::Hello {
             version,
-            pairing_token,
+            pairing,
             device_name,
             display,
         } = hello
@@ -121,19 +122,32 @@ impl Server {
             )
             .await;
         }
-        if let Some(token) = pairing_token {
-            if let Err(why) = self.redeem(&token, client, &device_name) {
-                return reject(&mut writer, RejectReason::BadPairingToken, &why).await;
+        match pairing {
+            PairingRequest::Token(token) => {
+                if let Err(why) = self.redeem(&token, client, &device_name) {
+                    return reject(&mut writer, RejectReason::BadPairingToken, &why).await;
+                }
+                eprintln!("Paired with {device_name} ({peer}), fingerprint {client}");
             }
-            eprintln!("Paired with {device_name} ({peer}), fingerprint {client}");
-        } else if !self.paired.load()?.contains(&client) {
-            eprintln!("{peer}: refused unpaired device {client}");
-            return reject(
-                &mut writer,
-                RejectReason::NotPaired,
-                "this tablet is not paired; run `tabextend pair` on the computer",
-            )
-            .await;
+            PairingRequest::Confirm { .. } => {
+                // Scan-and-confirm pairing is being built; refuse cleanly until then.
+                return reject(
+                    &mut writer,
+                    RejectReason::PairingDenied,
+                    "pairing by scanning is not available yet; scan the QR code",
+                )
+                .await;
+            }
+            PairingRequest::None if !self.paired.load()?.contains(&client) => {
+                eprintln!("{peer}: refused unpaired device {client}");
+                return reject(
+                    &mut writer,
+                    RejectReason::NotPaired,
+                    "this tablet is not paired; run `tabextend pair` on the computer",
+                )
+                .await;
+            }
+            PairingRequest::None => {}
         }
 
         let Some(_busy) = BusyGuard::take(&self.busy) else {
@@ -163,7 +177,7 @@ impl Server {
             self.options.encoder.element
         );
         let result = stream_to(
-            &capture.source(),
+            capture.as_ref(),
             &self.options.encoder,
             StreamConfig {
                 bitrate_bps: default_bitrate(width, height, fps),
@@ -216,7 +230,7 @@ impl Drop for BusyGuard<'_> {
 }
 
 async fn stream_to<R, W>(
-    source: &str,
+    capture: &dyn Capture,
     encoder: &EncoderSpec,
     config: StreamConfig,
     (width, height): (u32, u32),
@@ -233,11 +247,14 @@ where
     let gate = Arc::new(Mutex::new(FrameGate::new()));
     let stats = Arc::new(Mutex::new(Stats::default()));
 
-    let pipeline = {
+    let start = |gpu_buffers: bool| {
         let gate = gate.clone();
         let stats = stats.clone();
+        let frame_tx = frame_tx.clone();
+        let keyframe_tx = keyframe_tx.clone();
+        let error_tx = error_tx.clone();
         EncodePipeline::start(
-            source,
+            &capture.source(gpu_buffers),
             encoder,
             &config,
             move |frame| {
@@ -260,8 +277,12 @@ where
                 let _ = error_tx.send(error);
             },
         )
-        .map_err(io::Error::other)?
+        .map_err(io::Error::other)
     };
+    let mut gpu_buffers = accepts_gpu_buffers(encoder);
+    let mut pipeline = Some(start(gpu_buffers)?);
+    let mut captured_before = 0;
+    let mut sent_total = 0u64;
 
     write(
         writer,
@@ -292,9 +313,24 @@ where
                 let mut s = stats.lock().expect("stats");
                 s.frames += 1;
                 s.bytes += len as u64;
+                sent_total += 1;
             }
-            Some(()) = keyframe_requests.recv() => pipeline.request_keyframe(),
+            Some(()) = keyframe_requests.recv() => {
+                if let Some(p) = &pipeline { p.request_keyframe() }
+            }
             Some(error) = errors.recv() => {
+                // GPU buffers did not negotiate on this machine: retry once
+                // with copied frames before giving up.
+                if gpu_buffers && sent_total == 0 {
+                    eprintln!("  GPU buffers not available ({error}); copying frames instead");
+                    gpu_buffers = false;
+                    drop(pipeline.take());
+                    captured_before = 0;
+                    match start(false) {
+                        Ok(p) => { pipeline = Some(p); continue; }
+                        Err(e) => break Err(e),
+                    }
+                }
                 let _ = write(writer, &Message::Reject {
                     reason: RejectReason::CaptureFailed,
                     detail: error.clone(),
@@ -312,7 +348,7 @@ where
                 }
                 Some(Ok(Message::RequestKeyframe)) => {
                     gate.lock().expect("gate").reset();
-                    pipeline.request_keyframe();
+                    if let Some(p) = &pipeline { p.request_keyframe() }
                 }
                 Some(Ok(other)) => {
                     break Err(io::Error::other(format!("unexpected message from tablet: {other:?}")));
@@ -327,8 +363,11 @@ where
                 }
             }
             _ = report.tick() => {
+                let captured = pipeline.as_ref().map_or(0, EncodePipeline::captured_frames);
                 let mut s = stats.lock().expect("stats");
-                eprintln!("{}", s.summary(STATS_INTERVAL));
+                s.captured = captured - captured_before;
+                captured_before = captured;
+                eprintln!("{}{}", s.summary(STATS_INTERVAL), if gpu_buffers { " · zero-copy" } else { "" });
                 *s = Stats { rtt_us: s.rtt_us, ..Stats::default() };
             }
         }
@@ -343,6 +382,7 @@ where
 
 #[derive(Default)]
 struct Stats {
+    captured: u64,
     frames: u64,
     dropped: u64,
     bytes: u64,
@@ -353,7 +393,8 @@ impl Stats {
     fn summary(&self, over: Duration) -> String {
         let secs = over.as_secs_f64();
         format!(
-            "  {:.0} fps · {:.1} Mbit/s · round trip {:.1} ms · dropped {}",
+            "  captured {:.0} fps · sent {:.0} fps · {:.1} Mbit/s · round trip {:.1} ms · dropped {}",
+            self.captured as f64 / secs,
             self.frames as f64 / secs,
             self.bytes as f64 * 8.0 / secs / 1e6,
             self.rtt_us as f64 / 1000.0,
