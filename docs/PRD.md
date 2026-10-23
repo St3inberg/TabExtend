@@ -1,6 +1,6 @@
 # TabExtend — Product Requirements Document
 
-Oct 22, 2026 · @stephen · revised Oct 23, 2026 (wireless-first, hardware-agnostic)
+Oct 22, 2026 · @stephen · revised Oct 23, 2026 after the M0 spike
 
 ## Summary
 
@@ -24,24 +24,34 @@ what development and the latency targets are measured on.
 | Host   | Fedora 44 Workstation | GNOME 50, Wayland only, Intel TigerLake UHD + NVIDIA RTX 3050 Ti |
 | Client | Lenovo Idea Tab TB336FU | 11" 2560×1600, 90 Hz, MediaTek Dimensity 6300, 8 GB RAM, Android 16, Lenovo Tab Pen, 1×1 Wi-Fi 5 |
 
-## Existing options and why build
+## What the M0 spike changed
 
-Two working paths already exist on GNOME, so test them before writing code:
-they set the bar TabExtend must beat.
+Details in [`m0-spike.md`](m0-spike.md).
+
+| Finding | Consequence for this PRD |
+|---------|--------------------------|
+| Wi-Fi round trip 7.5 ms, 0% loss on the reference network | Network is a small part of the 90 ms budget. TCP's stall-on-loss problem does not show up here, so M1 uses TLS over TCP and QUIC becomes a measured decision (see Transport) |
+| GNOME RDP extend mode gave a black screen; the cause was GNOME and PipeWire running stale versions after an update. Retested after re-login: it works, but peaks at 74 % of a core and comes up at scale 1 | **Go.** RDP is the baseline; TabExtend focuses on what it lacks: hardware H.264, pairing, scale, direct touch, pen |
+| Windows App for Android offers no H.264 to GNOME's RDP server | Even if RDP works, it costs more host CPU than a dedicated H.264 stream |
+| Screen capture can silently break after system updates until the user logs out | `doctor` must capture a real frame and detect stale sessions (F14) |
+| Portal virtual monitors work on GNOME 50 and take their size from the consumer | F1/F2 confirmed. No need for Mutter's private `RecordVirtual` |
+| All five installed encoders work, but Intel's low-power encoder has no constant-bitrate mode on this driver | "Works" is not enough: encoders that accept every low-latency setting rank first (F12) |
+| GNOME has no system tray | F7 becomes a regular app; a Quick Settings toggle is a later option |
+
+## Existing options and why build
 
 | Option | How it works | Gap for this use |
 |--------|--------------|------------------|
-| GNOME RDP extend mode | Built in since GNOME 42: set screen-share mode to extend, connect from any RDP app | Touch is not mapped as direct input; generic RDP client UX |
-| TethrLink | Mutter ScreenCast virtual display → PipeWire → H.264 over USB tethering; GTK4 app | USB only; new project, one client; check pen pressure and packaging |
+| GNOME RDP extend mode | Built in since GNOME 42: set screen-share mode to extend, connect from any RDP app | Works after re-login. Android client lacks H.264 (CPU peaks 74 % of a core); scale 1; password login; generic RDP UX |
+| TethrLink | Mutter ScreenCast virtual display → PipeWire → H.264 over USB tethering; GTK4 app | USB only, conflicts with wireless-first; not yet tested |
 | Weylus | Browser-based client; touch and pen to PC | Wayland support is experimental; extend mode needs virtual-monitor setup |
 
 **Why build anyway.** A focused app can own the full experience: one-tap
-wireless connect, pen pressure and palm rejection, native packaging
-(RPM/Flatpak), and tuning for high-refresh tablet panels.
+wireless connect, direct touch, pen pressure and palm rejection, native
+packaging, and tuning for high-refresh tablet panels.
 
-**Decision gate.** Spend one evening on RDP extend mode and TethrLink. If
-either meets the latency and input targets below, contribute to it instead of
-starting fresh. Progress: [`m0-spike.md`](m0-spike.md).
+**Decision gate: go.** RDP works but misses the CPU target and the
+second-screen UX, so TabExtend is built, focused on what RDP lacks.
 
 ## Goals, non-goals, target user
 
@@ -51,7 +61,8 @@ wants extra screen space for docs, chat or a terminal while travelling.
 ### Goals (v1)
 
 1. Extend, not mirror: the tablet is a separate monitor in Settings → Displays.
-2. No cable needed: connect in under 10 seconds from opening the tablet app.
+2. No cable needed: connect in under 10 seconds from opening the tablet app,
+   after a one-time pairing and screen-sharing approval.
 3. Touch acts as direct pointer input on the tablet's area; pen works with pressure.
 4. Smooth enough for reading and light editing (targets below).
 5. Runs on any GNOME/Wayland machine: nothing hardcoded to one GPU, encoder,
@@ -62,26 +73,27 @@ wants extra screen space for docs, chat or a terminal while travelling.
 - X11, KDE Plasma or other compositors (GNOME/Mutter only first).
 - Audio forwarding.
 - More than one tablet at a time.
-- iPad or Windows clients.
+- iPad or Windows clients (a browser client could add these later; see Client).
 - Use over the internet; local networks and direct links only.
 
 ## Functional requirements
 
 | ID  | Requirement | Priority |
 |-----|-------------|----------|
-| F1  | Host creates a virtual monitor through the ScreenCast portal (virtual source), so GNOME treats it as a real display | Must |
-| F2  | Virtual monitor size and refresh come from the tablet's handshake (resolution, density, refresh), never from constants | Must |
-| F3  | USB transport (USB tethering or adb reverse) as an optional fast path | Could |
-| F4  | Wi-Fi transport with mDNS auto-discovery | Must |
+| F1  | Host creates a virtual monitor through the portal (virtual source), so GNOME treats it as a real display | Must |
+| F2  | Virtual monitor size and refresh come from the tablet's handshake, never from constants | Must |
+| F3  | USB transport (USB tethering) as an optional fast path | Could |
+| F4  | Wi-Fi transport; mDNS to find the host again when its address changes | Must |
 | F5  | Touch on the tablet moves and clicks the pointer inside the virtual monitor only | Must |
 | F6  | Pen input with pressure and tilt, exposed as a tablet device for apps like Krita and Xournal++ | Should |
-| F7  | Host app: connect, disconnect, quality preset, live latency and FPS | Must |
+| F7  | Host app (GTK4/libadwaita): pair, connect, disconnect, quality preset, live latency and FPS | Must |
 | F8  | Tablet app: fullscreen immersive mode, keep screen awake, reconnect automatically | Must |
-| F9  | Monitor position remembered between sessions (left, right, above) | Should |
+| F9  | Monitor position and scale remembered between sessions (left, right, above) | Should |
 | F10 | Quality presets: Battery, Balanced, Sharp (bitrate and resolution) | Could |
-| F11 | No-router mode: Wi-Fi Direct, or a laptop hotspot via NetworkManager, when the shared network blocks devices from seeing each other | Should |
-| F12 | Encoder chosen at runtime from what works on the machine (VA-API, NVENC, Quick Sync, software), with a user override | Must |
-| F13 | Pairing by QR code shown on the host (address, port, certificate fingerprint); 6-digit code as fallback | Must |
+| F11 | No-router mode: Wi-Fi Direct, or a laptop hotspot via NetworkManager, when the shared network isolates devices | Should |
+| F12 | Encoder chosen at runtime: first one that encodes **and** accepts its low-latency settings; then ones with limits; user override | Must |
+| F13 | Pairing by QR code shown on the host (address, port, certificate fingerprint, single-use token) | Must |
+| F14 | `tabextend doctor` captures a real frame and detects a stale desktop session ("log out and back in") | Must |
 
 ## Non-functional requirements
 
@@ -89,76 +101,118 @@ wants extra screen space for docs, chat or a terminal while travelling.
 |------|-----------------------|---------------------------|
 | Glass-to-glass latency | < 90 ms | < 50 ms |
 | Frame rate | 30–60 fps while content moves | 60 fps |
-| Image quality | Text readable at 100% scale, no smearing on static content, adaptive bitrate | Same |
+| Image quality | Text readable at 100% scale, no smearing on static content | Same |
 | Host CPU | < 15% of one core with a hardware encoder | Same |
 | Tablet battery | ≥ 3 hours of continuous use | ≥ 4 hours |
 | Laptop power | Report extra draw per encoder; prefer the lowest that meets the targets | Same |
 
-**Security.** Pairing is required before any stream starts. The stream is
-encrypted (QUIC/TLS or DTLS). The host never listens on interfaces it was not
-told to use. Touch input goes only through GNOME's RemoteDesktop portal, so
-the user approves access once and can revoke it. Pen pressure may need a
-`uinput` fallback (see risks); if so it is opt-in and documented as an
-exception.
+**Security.** Binding rules are in [`security.md`](security.md). In short:
+pairing before any stream, TLS 1.3 with both certificates pinned, the host
+listens only on the chosen interface, input only through GNOME's
+RemoteDesktop portal, untrusted input parsed with hard size limits.
 
-**Packaging.** RPM via a COPR repo and a Flatpak for the host; APK on GitHub
-Releases (F-Droid later).
+**Packaging.** RPM via COPR first. Flatpak after it: it needs access to
+`org.gnome.Mutter.DisplayConfig` for F9, which Flathub reviews case by case.
+APK on GitHub Releases; F-Droid later, so the client avoids Google Play
+services.
 
-## Technical architecture
+## Technical architecture and stack
 
 The host asks GNOME for a virtual monitor, captures it, hardware-encodes it
-and streams it; the tablet only decodes, displays and sends input back. Input
-goes into the virtual monitor only, so the tablet never controls the laptop's
-own screen.
+and streams it; the tablet only decodes, displays and sends input back.
 
-**Host (Linux): Rust.** gstreamer-rs, ashpd for the portals, gtk4-rs +
-libadwaita for the UI. GStreamer `pipewiresrc` → runtime-selected H.264
-encoder. D-Bus portals: `org.freedesktop.portal.ScreenCast`, `RemoteDesktop`.
+### Host: Rust (kept)
 
-**Client: Kotlin.** MediaCodec, SurfaceView.
+| Part | Choice | Why / status |
+|------|--------|--------------|
+| Capture + input permission | **RemoteDesktop portal session with ScreenCast sources** (ashpd) | One permission dialog covers screen and input, and input coordinates map to the stream. Changed from a ScreenCast-only session, which would need a second dialog in M2 |
+| Encoding | GStreamer: `pipewiresrc` → GPU converter (`vapostproc`, `cudaconvert`) → runtime-chosen H.264 encoder → `h264parse` | Working; probed by `doctor` with the real settings |
+| Monitor placement and scale | `org.gnome.Mutter.DisplayConfig` | Needed for F9 and readable text: a 2560×1600 virtual monitor at scale 1 is tiny. Private but stable; GNOME Settings uses it |
+| TLS | rustls (ring provider), TLS 1.3 only, custom verifiers | Working; no C build dependencies |
+| Async | tokio | Working |
+| UI | gtk4-rs + libadwaita (M3) | No tray on GNOME; a Quick Settings extension is optional later |
 
-**Transport.** UDP-based: QUIC (`quinn`) or RTP over DTLS. Over Wi-Fi, TCP's
-in-order delivery turns one lost packet into a stall for every frame behind
-it. Short keyframe interval or forward error correction so a loss costs at
-most one frame.
+Build dependencies stay small: GStreamer core development files only
+(`gstreamer-app` is used through signals, not linked).
 
-**Code layout.** Logic with no system dependencies (encoder selection, portal
-capability decoding, checks) lives in `tabextend-core` and is unit-tested
-anywhere. GStreamer and D-Bus code lives in `tabextend-host`.
+### Transport: TLS 1.3 over TCP, then measure
+
+M1–M3 use one TLS connection: length-prefixed messages (see
+`crates/core/src/protocol.rs`), frames dropped on the host until the next
+keyframe when the send queue fills, so latency cannot pile up.
+
+QUIC (`quinn` on the host) replaces it only if measurements under load show
+stalls on real networks. Its Android side would be Rust through JNI (needs
+rustup's Android targets; Fedora's Rust has none) or kwik (LGPL-3.0, pure
+Java). The protocol layer is transport-independent, so the switch is local.
+
+### Client: native Kotlin (kept), browser client as a later option
+
+| | Native Kotlin app (v1) | Browser client (later) |
+|---|---|---|
+| Decode | MediaCodec with the low-latency flag (Android 11+) | WebCodecs |
+| Transport | `SSLSocket`, built in | WebTransport (QUIC) |
+| Pen | MotionEvent pressure and tilt | PointerEvent pressure and tilt |
+| Install | APK | none; also iPads and other tablets |
+| Main risk | — | WebCodecs needs a secure context, and certificate pinning via `serverCertificateHashes` requires certificates valid at most 14 days |
+
+Client decisions:
+
+- Pairing: the QR code is a `tabextend://pair` link. The tablet's camera or
+  Lens app opens it in TabExtend, so the app needs no scanner library or
+  Google Play services. If a camera app will not open custom links, an
+  in-app scanner (ZXing, Apache-2.0) follows.
+- Client certificate: an EC key in Android Keystore, which also issues its
+  self-signed certificate; the key never leaves the device.
+- `minSdk 30` (Android 11): low-latency decoding and TLS 1.3 everywhere.
+
+### Code layout
+
+- `tabextend-core`: protocol, pairing, stream sizing, frame dropping,
+  encoder ranking, checks. Pure Rust, unit-tested anywhere.
+- `tabextend-host`: GStreamer, portals, TLS server, CLI.
+- `android/`: Kotlin client, with JVM unit tests for its protocol code.
+- `scripts/`: repeatable spike tests.
 
 ## Milestones
 
 Each milestone ends with something you can use.
 
-1. **M0 — Spike.** Measure Wi-Fi latency, test GNOME RDP extend mode and
-   TethrLink on the tablet. Go/no-go on building. Ships `tabextend doctor`.
-2. **M1 — Pixels on the tablet.** Portal virtual monitor → GStreamer →
-   encrypted UDP over Wi-Fi. Android app decodes with MediaCodec. Done when
-   you can drag a window onto the tablet.
+1. **M0 — Spike.** Done: Wi-Fi latency, encoders, portal virtual monitor,
+   `doctor`, RDP baseline. Go. (TethrLink not tried: USB-only.)
+2. **M1 — Pixels on the tablet.** Host server (built: pairing, TLS, encode
+   pipeline, frame dropping), Android app (decode, pair by link, reconnect),
+   RemoteDesktop+ScreenCast session. End-to-end test with a Rust client in
+   CI. Done when you can drag a window onto the tablet over Wi-Fi.
 3. **M2 — Touch input.** Tablet sends touch; host injects it through the
-   RemoteDesktop portal, mapped to the virtual monitor's stream.
-4. **M3 — Real app.** GTK4/Libadwaita host app with presets and stats, QR
-   pairing, auto-reconnect, remembered monitor position.
-5. **M4 — Pen and no-router mode.** Pressure and tilt; Wi-Fi Direct / hotspot.
-6. **M5 — Release.** COPR + Flatpak, APK on GitHub, demo video.
+   same portal session, clipped to the virtual monitor.
+4. **M3 — Real app.** GTK4/libadwaita host app, presets and stats, monitor
+   placement and scale (DisplayConfig), mDNS reconnect, `doctor` frame check.
+5. **M4 — Pen, no-router mode, transport decision.** Pressure and tilt; Wi-Fi
+   Direct or hotspot; QUIC only if measurements call for it.
+6. **M5 — Release.** COPR, APK on GitHub, Flatpak if accepted, demo video.
 
 ## Risks and open questions
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Virtual monitors depend on Mutter; no cross-compositor equivalent | KDE users unsupported | Scope v1 to GNOME; `doctor` reports portal support |
-| Portal virtual source vs Mutter's private `RecordVirtual` API | Flatpak may not work if only the private API behaves | Verify in M1 that the portal path shows up in Settings → Displays |
-| Portal asks for permission on each session | Annoying UX | Portal restore tokens (ScreenCast v4+, RemoteDesktop v2+) |
-| Tablet decoder limits at full resolution | Dropped frames | Start at half resolution with 2× scaling; take limits from MediaCodec capabilities |
-| Pen pressure needs a virtual tablet device | Pen works only as mouse | Check libei tablet support; else opt-in `uinput` fallback mapped to the virtual monitor |
-| Wi-Fi jitter | Stutter | UDP transport, adaptive bitrate, low-latency encoder settings |
+| Virtual monitors depend on Mutter | KDE users unsupported | Scope v1 to GNOME; `doctor` reports portal support |
+| Capture breaks after system updates until re-login | Black screen, looks like a TabExtend bug | `doctor` frame check and stale-session detection (F14) |
+| Permission dialog on first connect | User must be at the laptop once | Restore tokens (ScreenCast v4+, RemoteDesktop v2+) |
+| Virtual monitor at scale 1 is unreadable on high-density tablets | Tiny text | Set scale from the tablet's density through DisplayConfig (F9) |
+| Tablet decoder limits at full resolution | Dropped frames | Read MediaCodec capabilities in the handshake; host scales down (`--max-width`) |
+| Pen pressure needs a virtual tablet device; the portal and libei have no tablet-tool support yet | Pen works only as touch | Opt-in `uinput` fallback mapped to the virtual monitor, documented as a security exception |
+| Some encoders ignore bitrate settings (constant-quality only) | Bitrate spikes on detailed content | Ranked after fully working encoders (F12) |
+| Wi-Fi jitter and loss on busy networks | Stutter with TCP | Frame dropping now; QUIC if measured |
 | Hotel/café Wi-Fi isolates clients | Tablet not found | No-router mode (F11) |
-| Firewalls differ by distro | Connection refused | `doctor` checks; docs list the port |
+| Camera apps that will not open `tabextend://` links | Pairing needs a manual step | In-app scanner fallback |
+| Firewalls differ by distro | Connection refused | `doctor` check; docs list the port (47420 by default) |
 
 ### Open questions
 
 - [x] Rust for the Linux host, Kotlin for the tablet app.
 - [x] GPU: the app must not depend on it (F12).
-- [ ] Kotlin client from scratch, or fork TethrLink's client?
-- [ ] QUIC (`quinn`) or RTP over DTLS?
 - [x] License: GPL-3.0-or-later.
+- [x] Transport for M1–M3: TLS 1.3 over TCP; QUIC decided in M4 by measurement.
+- [x] Go/no-go: go; RDP works but misses the CPU and UX targets.
+- [x] Client: native Kotlin. A browser client stays a possible later addition.

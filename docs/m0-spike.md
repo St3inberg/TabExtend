@@ -77,7 +77,33 @@ Client setup pitfalls: a gateway set to the host address makes the app ask
 for gateway credentials; a saved account with a mistyped password fails as
 `MIC verification failed` in the server log.
 
-### Root cause (in progress)
+### Retest after re-login: works
+
+After a reboot, the same setup works: the tablet shows the desktop and
+GNOME adds a 2560×1600 @ 60 Hz virtual monitor (`Meta-0`). The user found it
+usable for dragging windows onto the tablet.
+
+Measured over 2 minutes of use (percent of one core):
+
+| Process | Average | Peak |
+|---------|---------|------|
+| gnome-remote-desktop | 12.3 % | 73.9 % |
+| gnome-shell | 11.6 % | 46.0 % |
+
+Gaps against the PRD targets:
+
+- **CPU:** peaks far above 15 % of one core, because the client takes no
+  H.264 and the server must use a CPU codec.
+- **Scale:** the virtual monitor comes up at scale 1, so text on a 2560×1600
+  11" panel is very small.
+- **UX:** username/password login, a gateway setting that is easy to get
+  wrong, and a generic RDP client rather than a second-screen app.
+
+**Go/no-go: go.** RDP is a working baseline, so TabExtend focuses on what
+it does not give: hardware H.264 (low host CPU), pairing instead of
+passwords, scale and placement set for the tablet, direct touch and pen.
+
+### Root cause of the black screen
 
 `scripts/m0-virtual-monitor.py` takes RDP and the tablet out of the picture:
 it asks Mutter for a virtual monitor and reads it with GStreamer. It hangs
@@ -85,9 +111,10 @@ the same way, and so does recording the built-in screen (`--connector eDP-1`).
 GNOME Shell's stream offers normal formats, but the consumer never appears
 as a PipeWire client.
 
-Likely cause: gnome-shell, mutter and wireplumber were updated during the
-session, and the running processes are the old versions (deleted libraries
-still mapped). To confirm after a reboot.
+Cause, confirmed by a reboot: gnome-shell, mutter and wireplumber were
+updated during the session, and the running processes were the old versions
+(deleted libraries still mapped). After the reboot both the virtual monitor
+and `eDP-1` stream.
 
 TabExtend uses the same Mutter virtual-monitor stream, so this check moves
 into `tabextend doctor`: a screencast that cannot deliver a frame must be a
@@ -96,9 +123,9 @@ FAIL, not a PASS based on portal properties alone.
 ## To do
 
 - [x] `tabextend doctor`: all checks pass on the reference laptop
-- [ ] Reboot, then rerun `scripts/m0-virtual-monitor.py` (virtual and `--connector eDP-1`)
+- [x] Reboot, then rerun `scripts/m0-virtual-monitor.py`: both stream
 - [ ] Throughput + latency under load (iperf3 on the tablet, or a small test app)
-- [x] GNOME RDP extend mode: black screen, see above. Retest after the reboot.
+- [x] GNOME RDP extend mode: works after re-login; go for TabExtend, see above
 - [ ] TethrLink: latency, pen pressure, does it work over Wi-Fi
 - [ ] Compare `vah264lpenc` vs `vah264enc` vs `nvh264enc`: encode latency, CPU, power draw
-- [ ] Go / no-go
+- [x] Go / no-go: go

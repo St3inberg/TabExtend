@@ -44,7 +44,8 @@ an unlocked device.
 
 ### Transport
 
-- Every byte is encrypted and authenticated: QUIC (TLS 1.3) or DTLS 1.3.
+- Every byte is encrypted and authenticated with TLS 1.3 (over TCP for now;
+  QUIC, also TLS 1.3, if measurements call for it; see PRD Transport).
   No plaintext mode, not even for debugging.
 - The host listens only while the user has TabExtend open and waiting for a
   tablet, and only on the interface it was told to use (Wi-Fi, Wi-Fi Direct
