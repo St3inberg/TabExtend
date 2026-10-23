@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TabExtend</string>
+    <string name="paste_link">Paste pairing link</string>
+    <string name="not_paired">Not paired yet.\n\nOn the computer, run \"tabextend pair\" and scan the QR code with this tablet\'s camera, or copy the link and tap the button below.</string>
+    <string name="bad_link">That is not a TabExtend pairing link.</string>
+    <string name="pairing">Pairing…\n\nCheck the computer shows this fingerprint:\n%1$s</string>
+    <string name="streaming">%1$d×%2$d · %3$s%4$s</string>
+    <string name="stats">%1$.0f fps · %2$.1f Mbit/s</string>
+</resources>

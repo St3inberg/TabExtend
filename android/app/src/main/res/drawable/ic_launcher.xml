@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A laptop screen and a tablet side by side. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#1E3A5F" android:pathData="M4,4h40v40h-40z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M8,15h19v13h-19z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M6,30h23v2h-23z" />
+    <path android:fillColor="#7FB3E6" android:pathData="M31,13h11v19h-11z" />
+</vector>

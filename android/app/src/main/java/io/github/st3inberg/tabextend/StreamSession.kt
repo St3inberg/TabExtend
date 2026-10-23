@@ -1,0 +1,166 @@
+package io.github.st3inberg.tabextend
+
+import android.view.Surface
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.IOException
+import java.io.OutputStream
+import javax.net.ssl.SSLSocket
+
+/**
+ * One tablet's connection to its host, on a background thread: connect,
+ * say hello, decode video until the connection ends, then reconnect.
+ *
+ * Gives up (no more retries) only when retrying cannot help: the host
+ * does not know this tablet, the pairing code was refused, or the
+ * versions do not match.
+ */
+class StreamSession(
+    private val host: Host,
+    private var pairingToken: ByteArray?,
+    private val deviceName: String,
+    private val display: DisplayInfo,
+    private val surface: Surface,
+    private val listener: Listener,
+) {
+    interface Listener {
+        fun onStatus(text: String)
+        fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean)
+        fun onPaired()
+        fun onStats(fps: Double, mbps: Double)
+        fun onGaveUp(reason: String)
+    }
+
+    @Volatile private var running = true
+    @Volatile private var socket: SSLSocket? = null
+    private val thread = Thread(::run, "tabextend-session")
+
+    fun start() = thread.start()
+
+    fun stop() {
+        running = false
+        runCatching { socket?.close() }
+        thread.interrupt()
+    }
+
+    private fun run() {
+        var backoffMs = 500L
+        while (running) {
+            val outcome = try {
+                connectOnce()
+            } catch (e: IOException) {
+                if (!running) return
+                listener.onStatus("Connection lost: ${e.message ?: e.javaClass.simpleName}")
+                Outcome.Retry
+            } catch (e: Exception) {
+                if (!running) return
+                listener.onStatus("Error: ${e.message ?: e.javaClass.simpleName}")
+                Outcome.Retry
+            }
+            when (outcome) {
+                is Outcome.GiveUp -> {
+                    running = false
+                    listener.onGaveUp(outcome.reason)
+                    return
+                }
+                Outcome.Streamed -> backoffMs = 500L
+                Outcome.Retry -> {}
+            }
+            try {
+                Thread.sleep(backoffMs)
+            } catch (e: InterruptedException) {
+                return
+            }
+            backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+            listener.onStatus("Reconnecting to ${host.address}…")
+        }
+    }
+
+    private sealed class Outcome {
+        data object Streamed : Outcome()
+        data object Retry : Outcome()
+        data class GiveUp(val reason: String) : Outcome()
+    }
+
+    private fun connectOnce(): Outcome {
+        listener.onStatus("Connecting to ${host.address}…")
+        val tls = Tls.connect(host)
+        socket = tls
+        tls.use {
+            val output = BufferedOutputStream(tls.outputStream)
+            val input = DataInputStream(BufferedInputStream(tls.inputStream, 256 * 1024))
+            send(output, Message.Hello(Protocol.VERSION, pairingToken, deviceName, display))
+
+            val welcome = when (val first = Protocol.read(input)) {
+                is Message.Welcome -> first
+                is Message.Reject -> return rejected(first)
+                else -> throw ProtocolException("expected welcome, got ${first.javaClass.simpleName}")
+            }
+            if (pairingToken != null) {
+                pairingToken = null // single use; reconnects go by certificate
+                listener.onPaired()
+            }
+            val width = welcome.width.toInt()
+            val height = welcome.height.toInt()
+            val decoder = VideoDecoder(width, height, surface)
+            listener.onStreaming(width, height, decoder.name, decoder.lowLatency)
+            try {
+                stream(input, output, decoder)
+            } finally {
+                decoder.release()
+            }
+            return Outcome.Streamed
+        }
+    }
+
+    private fun stream(input: DataInputStream, output: OutputStream, decoder: VideoDecoder) {
+        var waitingForKeyframe = true
+        var windowStart = System.nanoTime()
+        var windowFrames = decoder.framesRendered
+        var windowBytes = 0L
+        while (running) {
+            when (val message = Protocol.read(input)) {
+                is Message.Video -> {
+                    windowBytes += message.data.size
+                    if (waitingForKeyframe && !message.keyframe) continue
+                    if (decoder.submit(message.data, message.ptsUs, message.keyframe)) {
+                        waitingForKeyframe = false
+                    } else if (!waitingForKeyframe) {
+                        waitingForKeyframe = true
+                        send(output, Message.RequestKeyframe)
+                    }
+                }
+                is Message.Ping -> send(output, Message.Pong(message.id, message.sentUs))
+                is Message.Reject -> throw IOException(message.detail)
+                else -> {}
+            }
+            val now = System.nanoTime()
+            val elapsed = (now - windowStart) / 1e9
+            if (elapsed >= 1.0) {
+                listener.onStats((decoder.framesRendered - windowFrames) / elapsed, windowBytes * 8 / elapsed / 1e6)
+                windowStart = now
+                windowFrames = decoder.framesRendered
+                windowBytes = 0
+            }
+        }
+    }
+
+    private fun rejected(reject: Message.Reject): Outcome = when (reject.reason) {
+        RejectReason.NOT_PAIRED, RejectReason.BAD_PAIRING_TOKEN, RejectReason.UNSUPPORTED_VERSION ->
+            Outcome.GiveUp(reject.detail)
+        RejectReason.BUSY, RejectReason.CAPTURE_FAILED -> {
+            listener.onStatus(reject.detail)
+            Outcome.Retry
+        }
+    }
+
+    private fun send(output: OutputStream, message: Message) {
+        output.write(Protocol.encode(message))
+        output.flush()
+    }
+
+    private companion object {
+        const val MAX_BACKOFF_MS = 5000L
+    }
+}
