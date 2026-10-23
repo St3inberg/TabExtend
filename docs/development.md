@@ -16,7 +16,8 @@ crates/
            portals.rs  read portal properties over D-Bus
            doctor.rs   gather facts, run checks, print the report
            tests/      integration tests against the installed GStreamer
-docs/      PRD, setup tutorial, spike notes, this guide
+scripts/  test helpers that change system settings (see docs/security.md#scripts)
+docs/      PRD, setup tutorial, spike notes, security design, this guide
 ```
 
 The split is deliberate. Anything that decides something (which encoder,
@@ -42,9 +43,11 @@ cargo test --workspace          # all tests
 cargo test -p tabextend-core    # pure logic only; needs no system libraries
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check                # vulnerabilities, licenses, sources (cargo install cargo-deny)
+shellcheck scripts/*.sh
 ```
 
-CI runs the same four commands on every push and pull request
+CI runs the same commands on every push and pull request
 (`.github/workflows/ci.yml`).
 
 What is tested where:

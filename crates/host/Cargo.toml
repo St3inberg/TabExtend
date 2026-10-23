@@ -12,6 +12,6 @@ name = "tabextend"
 path = "src/main.rs"
 
 [dependencies]
-tabextend-core = { path = "../core" }
+tabextend-core = { path = "../core", version = "0.1.0" }
 gstreamer = "0.25"
 zbus = "6"

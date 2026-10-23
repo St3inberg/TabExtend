@@ -37,6 +37,7 @@ You need GStreamer and a video encoder installed first. The
 - [Development guide](docs/development.md): code layout, tests, tablet debugging
 - [Product requirements](docs/PRD.md): goals, requirements, roadmap
 - [M0 spike notes](docs/m0-spike.md): measurements on the reference hardware
+- [Security design](docs/security.md): threat model and controls; report issues via [SECURITY.md](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License
