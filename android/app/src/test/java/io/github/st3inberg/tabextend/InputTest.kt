@@ -30,6 +30,14 @@ class InputTest {
     }
 
     @Test
+    fun audioRoundTrips() {
+        val pcm = byteArrayOf(1, 2, 3, 4)
+        val decoded = Protocol.read(DataInputStream(ByteArrayInputStream(Protocol.encode(Message.Audio(7, pcm))))) as Message.Audio
+        assertEquals(7L, decoded.ptsUs)
+        assertArrayEquals(pcm, decoded.pcm)
+    }
+
+    @Test
     fun slotsAreSmallReusedAndBounded() {
         val slots = SlotTable(2)
         assertEquals(0, slots.acquire(1000))

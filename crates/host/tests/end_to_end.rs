@@ -226,11 +226,11 @@ impl Client {
             .expect("host went quiet")
     }
 
-    /// Skip pings until a message of interest arrives.
+    /// Skip pings and sound until a message of interest arrives.
     async fn receive_skipping_pings(&mut self) -> Option<Message> {
         loop {
             match self.receive().await? {
-                Message::Ping { .. } => continue,
+                Message::Ping { .. } | Message::Audio { .. } => continue,
                 other => return Some(other),
             }
         }
@@ -373,7 +373,7 @@ async fn ping_is_answered_while_streaming() {
     loop {
         match client.receive().await {
             Some(Message::Pong { id: 77, sent_us: 5 }) => break,
-            Some(Message::Video { .. } | Message::Ping { .. }) => continue,
+            Some(Message::Video { .. } | Message::Ping { .. } | Message::Audio { .. }) => continue,
             other => panic!("expected Pong, got {other:?}"),
         }
     }
@@ -680,4 +680,28 @@ async fn pairing_by_code_needs_pairing_mode() {
     client.hello_confirm(&[7; 32]).await;
     expect_reject(&mut client, RejectReason::PairingDenied).await;
     assert!(approver.asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sound_reaches_the_tablet_as_stereo_pcm() {
+    let host = start_host().await;
+    let mut client = Tablet::new()
+        .connect(&host, host.fingerprint)
+        .await
+        .unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+    loop {
+        match client.receive().await {
+            Some(Message::Audio { pcm, .. }) => {
+                assert!(!pcm.is_empty());
+                assert_eq!(pcm.len() % 4, 0, "whole 16-bit stereo frames");
+                // A sine tone, not silence.
+                assert!(pcm.iter().any(|&b| b != 0));
+                break;
+            }
+            Some(_) => continue,
+            None => panic!("host closed before sending audio"),
+        }
+    }
 }

@@ -1,6 +1,7 @@
 //! TabExtend host internals. The binary lives in `main.rs`.
 
 pub mod approve;
+pub mod audio;
 pub mod capture;
 pub mod doctor;
 pub mod identity;

@@ -163,13 +163,15 @@ class StreamSession(
             val writer = Thread({ writeLoop(output) }, "tabextend-writer").apply { start() }
             streaming = true
             listener.onStreaming(width, height, decoder.name, decoder.lowLatency || decoder.vendorLowLatency.isNotEmpty())
+            val audio = AudioPlayer()
             try {
-                stream(input, decoder)
+                stream(input, decoder, audio)
             } finally {
                 streaming = false
                 writer.interrupt()
                 outbox.clear()
                 decoder.release()
+                audio.release()
             }
             return Outcome.Streamed
         }
@@ -190,7 +192,7 @@ class StreamSession(
         }
     }
 
-    private fun stream(input: DataInputStream, decoder: VideoDecoder) {
+    private fun stream(input: DataInputStream, decoder: VideoDecoder, audio: AudioPlayer) {
         var waitingForKeyframe = true
         var windowStart = System.nanoTime()
         var windowFrames = decoder.framesRendered
@@ -207,6 +209,7 @@ class StreamSession(
                         outbox.offer(Message.RequestKeyframe)
                     }
                 }
+                is Message.Audio -> audio.write(message.pcm)
                 is Message.Ping -> outbox.offer(Message.Pong(message.id, message.sentUs))
                 is Message.Reject -> throw IOException(message.detail)
                 else -> {}

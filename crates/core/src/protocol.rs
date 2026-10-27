@@ -18,6 +18,12 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// Largest video frame accepted, in bytes. A 2560×1600 keyframe at a high
 /// bitrate is around 1 MiB.
 pub const MAX_VIDEO_FRAME: usize = 16 * 1024 * 1024;
+/// Largest audio chunk accepted, in bytes (about 340 ms of the format below).
+pub const MAX_AUDIO_CHUNK: usize = 64 * 1024;
+/// Audio is sent as raw PCM: 48 kHz, 2 channels, signed 16-bit little-endian,
+/// interleaved. 1.5 Mbit/s is small next to the video and adds no codec delay.
+pub const AUDIO_RATE: u32 = 48_000;
+pub const AUDIO_CHANNELS: u32 = 2;
 /// Largest control message accepted, in bytes.
 pub const MAX_CONTROL_MESSAGE: usize = 4096;
 /// Longest device name accepted, in bytes.
@@ -169,6 +175,11 @@ pub enum Message {
     },
     /// Client → host: touch, pointer, button, scroll or key.
     Input(InputEvent),
+    /// Host → client: a chunk of the laptop's sound, in the format above.
+    Audio {
+        pts_us: u64,
+        pcm: Vec<u8>,
+    },
 }
 
 mod tag {
@@ -186,6 +197,7 @@ mod tag {
     pub const BUTTON: u8 = 12;
     pub const SCROLL: u8 = 13;
     pub const KEY: u8 = 14;
+    pub const AUDIO: u8 = 15;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +245,7 @@ pub const HEADER_LEN: usize = 4;
 pub fn max_length(tag: u8) -> Result<usize, ProtocolError> {
     match tag {
         tag::VIDEO => Ok(1 + MAX_VIDEO_FRAME + 9),
+        tag::AUDIO => Ok(1 + 8 + MAX_AUDIO_CHUNK),
         tag::HELLO
         | tag::WELCOME
         | tag::REJECT
@@ -369,6 +382,11 @@ impl Message {
                 body.u16(*code);
                 body.u8(u8::from(*pressed));
             }
+            Message::Audio { pts_us, pcm } => {
+                body.u8(tag::AUDIO);
+                body.u64(*pts_us);
+                body.bytes(pcm);
+            }
         }
         let body = body.0;
         let mut out = Vec::with_capacity(HEADER_LEN + body.len());
@@ -500,6 +518,10 @@ impl Message {
                 horizontal: r.u16()? as i16,
                 vertical: r.u16()? as i16,
             }),
+            tag::AUDIO => Message::Audio {
+                pts_us: r.u64()?,
+                pcm: r.rest().to_vec(),
+            },
             tag::KEY => Message::Input(InputEvent::Key {
                 code: r.u16()?,
                 pressed: r.bool("key state")?,
@@ -689,7 +711,18 @@ mod tests {
                 code: 30,
                 pressed: false,
             }),
+            Message::Audio {
+                pts_us: 7,
+                pcm: vec![1, 2, 3, 4],
+            },
         ]
+    }
+
+    #[test]
+    fn oversized_audio_is_refused_from_the_header() {
+        let max = max_length(15).unwrap() as u32;
+        assert!(check_length(max, 15).is_ok());
+        assert!(check_length(max + 1, 15).is_err());
     }
 
     #[test]
@@ -741,8 +774,14 @@ mod tests {
             let (_, body) = split(&encoded);
             for cut in 0..body.len() {
                 let result = Message::decode(&body[..cut]);
-                // A video frame cut after its header is still a valid (shorter) frame.
-                if !matches!(message, Message::Video { .. }) || cut < 10 {
+                // Video and audio cut after their header are still valid,
+                // just shorter (10 and 9 header bytes).
+                let header = match message {
+                    Message::Video { .. } => 10,
+                    Message::Audio { .. } => 9,
+                    _ => usize::MAX,
+                };
+                if cut < header {
                     assert!(result.is_err(), "{message:?} cut at {cut} decoded");
                 }
             }

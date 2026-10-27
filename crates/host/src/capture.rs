@@ -40,6 +40,9 @@ pub trait Capture: Send + Sync {
     fn source(&self, gpu_buffers: bool) -> String;
     /// The surface's size in logical pixels, the space input positions use.
     fn input_size(&self) -> (f64, f64);
+    /// A gst-launch fragment producing the sound to play on the tablet, or
+    /// None if this backend has none. `device_name` labels it for the user.
+    fn audio_source(&self, device_name: &str) -> Option<String>;
     /// Deliver one input call to the surface.
     fn inject(&self, call: InputCall) -> BoxFuture<'_, Result<(), String>>;
     /// Release the surface (for a virtual monitor: remove it from GNOME).
@@ -101,6 +104,11 @@ impl Capture for TestPatternCapture {
 
     fn input_size(&self) -> (f64, f64) {
         (self.width.into(), self.height.into())
+    }
+
+    /// A steady tone, so tests can check audio arrives.
+    fn audio_source(&self, _device_name: &str) -> Option<String> {
+        Some("audiotestsrc is-live=true wave=sine freq=440 samplesperbuffer=480".into())
     }
 
     fn inject(&self, call: InputCall) -> BoxFuture<'_, Result<(), String>> {
@@ -272,6 +280,30 @@ struct PortalCapture {
     eis: Option<EisInput>,
 }
 
+/// A PipeWire sound output named after the tablet, as a pipeline source:
+/// whatever the user plays to it comes out of this element.
+pub fn virtual_sink(device_name: &str) -> String {
+    format!(
+        "pipewiresrc stream-properties=\"props,media.class=Audio/Sink,node.name=tabextend-audio,\
+         priority.session=0,node.description=\\\"TabExtend: {}\\\"\"",
+        label(device_name)
+    )
+}
+
+/// A device name made safe to embed in a pipeline description.
+fn label(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || " -_.".contains(*c))
+        .take(48)
+        .collect();
+    if clean.trim().is_empty() {
+        "tablet".into()
+    } else {
+        clean.trim().to_owned()
+    }
+}
+
 fn key_state(pressed: bool) -> KeyState {
     if pressed {
         KeyState::Pressed
@@ -304,6 +336,13 @@ impl Capture for PortalCapture {
 
     fn input_size(&self) -> (f64, f64) {
         self.logical
+    }
+
+    /// A sound output that appears in GNOME's Sound settings while the
+    /// tablet is connected, and disappears with it. Low priority, so the
+    /// desktop never switches to it on its own: the user picks it.
+    fn audio_source(&self, device_name: &str) -> Option<String> {
+        Some(virtual_sink(device_name))
     }
 
     fn inject(&self, call: InputCall) -> BoxFuture<'_, Result<(), String>> {
@@ -373,5 +412,43 @@ impl Capture for PortalCapture {
             let _ = self.session.close().await;
             drop(self.fd);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{label, virtual_sink};
+    use gst::prelude::*;
+    use gstreamer as gst;
+
+    #[test]
+    fn virtual_sink_parses_with_the_label_intact() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(&format!("{} ! fakesink", virtual_sink("Idea Tab")))
+            .expect("parses");
+        let source = pipeline
+            .downcast_ref::<gst::Bin>()
+            .unwrap()
+            .iterate_sources()
+            .next()
+            .unwrap()
+            .unwrap();
+        let props = source.property::<gst::Structure>("stream-properties");
+        assert_eq!(props.get::<String>("media.class").unwrap(), "Audio/Sink");
+        assert_eq!(
+            props.get::<String>("node.description").unwrap(),
+            "TabExtend: Idea Tab"
+        );
+    }
+
+    #[test]
+    fn labels_cannot_break_out_of_the_pipeline_description() {
+        assert_eq!(label("Lenovo Idea Tab"), "Lenovo Idea Tab");
+        assert_eq!(
+            label("evil\" ! filesink location=/tmp/x"),
+            "evil  filesink locationtmpx"
+        );
+        assert_eq!(label("  "), "tablet");
+        assert!(label(&"x".repeat(100)).len() <= 48);
     }
 }

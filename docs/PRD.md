@@ -71,7 +71,6 @@ wants extra screen space for docs, chat or a terminal while travelling.
 ### Non-goals (v1)
 
 - X11, KDE Plasma or other compositors (GNOME/Mutter only first).
-- Audio forwarding.
 - More than one tablet at a time.
 - iPad or Windows clients (a browser client could add these later; see Client).
 - Use over the internet; local networks and direct links only.
@@ -94,6 +93,7 @@ wants extra screen space for docs, chat or a terminal while travelling.
 | F12 | Encoder chosen at runtime: first one that encodes **and** accepts its low-latency settings; then ones with limits; user override | Must |
 | F13 | Pairing by QR code shown on the host (address, port, certificate fingerprint, single-use token) | Must |
 | F14 | `tabextend doctor` captures a real frame and detects a stale desktop session ("log out and back in") | Must |
+| F15 | Sound: while connected, the tablet appears as a sound output in GNOME's settings; the user picks it to hear the laptop on the tablet | Should |
 
 ## Non-functional requirements
 

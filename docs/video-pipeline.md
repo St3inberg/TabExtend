@@ -184,12 +184,28 @@ it asks for 1808×1130. The decoded picture is scaled up to fill the panel.
   the tablet asks the host for a keyframe, and delta frames are skipped
   until it arrives.
 
+## Sound
+
+While a tablet is connected, the host registers a PipeWire sound output
+named "TabExtend: <tablet>" (a `pipewiresrc` whose stream is an
+`Audio/Sink`), so it shows up in GNOME's Sound settings and the user picks
+it like any speaker. It has a low session priority, so the desktop never
+switches to it on its own, and it disappears when the tablet disconnects.
+
+The sound goes to the tablet as raw PCM, 48 kHz stereo 16-bit (about
+1.5 Mbit/s, small next to the video) in its own message type, with no codec
+delay. The tablet plays it through Android's low-latency `AudioTrack` with
+about 60 ms of buffer; writes never block, so if the buffer is full the
+excess is dropped instead of letting delay build up. On the host, a full
+send queue also drops audio: a gap is better than sound that lags.
+
 ## Considered and not done
 
 | Option | Why not (yet) |
 |---|---|
 | A playout buffer on the tablet to even out Wi-Fi bursts | Adds latency to every frame. Only worth it if measurements show bursts cause visible jitter after the fixes above. |
 | UDP / QUIC | No loss measured on the reference network; TCP is simpler and native on Android. Revisit with measurements on busy networks. |
+| Opus-compressed sound | Raw PCM is 1.5 Mbit/s and adds no delay; worth it only if bandwidth becomes the limit. |
 | HEVC | The tablet's HEVC decoder has the same size and rate limits as its H.264 decoder, and not every laptop can encode HEVC. |
 | Typing a pairing code instead of comparing one | See [security.md](security.md): without a PAKE a machine in the middle could relay the typed code. |
 
@@ -197,5 +213,5 @@ it asks for 1808×1130. The decoded picture is scaled up to fill the panel.
 
 - Occasional Wi-Fi round-trip spikes to ~110 ms, probably the tablet's
   Wi-Fi power saving. Not yet investigated.
-- Input does not reach the virtual monitor yet ([#1](https://github.com/St3inberg/TabExtend/issues/1)),
-  which also blocks a fully automated motion benchmark.
+- No automated motion benchmark yet; with input working (libei), one can
+  drive steady motion on the virtual monitor from a test.

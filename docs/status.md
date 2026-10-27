@@ -17,34 +17,18 @@ Work in progress. Last updated 2026-10-27, on the reference hardware
 - **Hardware encoding chosen at runtime** (VA-API on the reference laptop),
   with zero-copy GPU buffers from GNOME where the encoder chain takes them.
 - **Reconnects** automatically; GNOME's permission is remembered.
+- **Touch, pointer, buttons, scroll and keys** reach the virtual monitor,
+  through libei.
+- **Sound on the tablet:** pick "TabExtend: <tablet>" as the output in
+  GNOME's Sound settings while connected.
 
 ## Does not work yet
 
-### Touch, pen, mouse and keyboard input
+### Input: fixed
 
-The tablet sends input and the host maps it safely (clipped to the virtual
-monitor, released on disconnect; see `crates/core/src/input.rs`), but GNOME
-rejects it with `Invalid position`.
-
-Cause, found in `xdg-desktop-portal` (`src/remote-desktop.c`,
-`check_position`): every absolute pointer or touch position is checked
-against the stream size reported when the session starts. A virtual
-monitor's size is only negotiated afterwards, so the portal sees 0×0 and
-rejects every position. This is not specific to TabExtend; GNOME's own RDP
-server avoids it by talking to Mutter directly.
-
-**Next step: input through libei.** The same portal session can hand out a
-libei connection (`ConnectToEIS`, RemoteDesktop portal v2). Mutter's EIS
-server maps input onto each monitor, virtual ones included, using regions
-tagged with the stream's mapping id, and it supports touch
-(`meta-eis-client.c`: `EIS_DEVICE_CAP_TOUCH`). The user still approves once
-in GNOME's dialog. The `reis` crate implements the libei protocol in Rust.
-
-The current fallback (touch refused, so fingers drive the pointer) stays
-for desktops whose EIS lacks touch.
-
-Also worth reporting upstream: the portal could skip or defer the position
-check for virtual streams.
+The portal's own input methods reject every position on a virtual monitor
+(they check against a 0×0 stream size); input now goes through libei from
+the same portal session. Pen pressure is still missing (#7).
 
 ### Frame rate: fixed
 

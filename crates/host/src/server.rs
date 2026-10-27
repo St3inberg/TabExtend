@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 
 use crate::approve::Approver;
+use crate::audio::AudioPipeline;
 use crate::capture::{Capture, CaptureBackend};
 use crate::identity::{HostIdentity, PairedStore, fingerprint};
 use crate::pipeline::{EncodePipeline, EncodedFrame, StreamConfig, accepts_gpu_buffers};
@@ -40,6 +41,8 @@ const REVEAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Encoded frames waiting to be sent. Small on purpose: anything queued is latency.
 const FRAME_QUEUE: usize = 3;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
+/// Audio chunks waiting to be sent (each about 10–20 ms).
+const AUDIO_QUEUE: usize = 16;
 const STATS_INTERVAL: Duration = Duration::from_secs(5);
 /// Keyframes are for recovery; with a reliable transport they are rarely needed.
 const KEYFRAME_SECONDS: u32 = 5;
@@ -193,6 +196,7 @@ impl Server {
         );
         let result = stream_to(
             capture.as_ref(),
+            &device_name,
             &self.options.encoder,
             StreamConfig {
                 bitrate_bps: default_bitrate(width, height, fps),
@@ -316,6 +320,7 @@ impl Drop for BusyGuard<'_> {
 
 async fn stream_to<R, W>(
     capture: &dyn Capture,
+    device_name: &str,
     encoder: &EncoderSpec,
     config: StreamConfig,
     (width, height): (u32, u32),
@@ -372,6 +377,16 @@ where
     let mut captured_before = 0;
     let mut sent_total = 0u64;
 
+    // Sound: optional. Stale audio is worse than a gap, so a full queue drops.
+    let (audio_tx, mut audio) = mpsc::channel::<(u64, Vec<u8>)>(AUDIO_QUEUE);
+    let _audio_pipeline = capture.audio_source(device_name).and_then(|source| {
+        AudioPipeline::start(&source, move |pts, pcm| {
+            let _ = audio_tx.try_send((pts, pcm));
+        })
+        .map_err(|e| eprintln!("  no sound for the tablet: {e}"))
+        .ok()
+    });
+
     write(
         writer,
         &Message::Welcome {
@@ -402,6 +417,11 @@ where
                 s.frames += 1;
                 s.bytes += len as u64;
                 sent_total += 1;
+            }
+            Some((pts_us, pcm)) = audio.recv() => {
+                if let Err(e) = write(writer, &Message::Audio { pts_us, pcm }).await {
+                    break Err(e);
+                }
             }
             Some(()) = keyframe_requests.recv() => {
                 if let Some(p) = &pipeline { p.request_keyframe() }

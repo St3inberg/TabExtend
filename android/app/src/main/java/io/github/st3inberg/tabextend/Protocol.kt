@@ -20,6 +20,9 @@ object Protocol {
     const val VERSION = 1
     const val MAX_VIDEO_FRAME = 16 * 1024 * 1024
     const val MAX_CONTROL_MESSAGE = 4096
+    const val MAX_AUDIO_CHUNK = 64 * 1024
+    /** Audio is raw PCM: 48 kHz, stereo, signed 16-bit little-endian, interleaved. */
+    const val AUDIO_RATE = 48_000
     const val MAX_NAME = 64
     const val PAIRING_TOKEN_LEN = 16
     const val NONCE_LEN = 32
@@ -39,9 +42,11 @@ object Protocol {
     private const val BUTTON = 12
     private const val SCROLL = 13
     private const val KEY = 14
+    private const val AUDIO = 15
 
     fun maxLength(tag: Int): Int = when (tag) {
         VIDEO -> 1 + MAX_VIDEO_FRAME + 9
+        AUDIO -> 1 + 8 + MAX_AUDIO_CHUNK
         HELLO, WELCOME, REJECT, PING, PONG, REQUEST_KEYFRAME, PAIR_CHALLENGE, PAIR_REVEAL,
         TOUCH, POINTER_MOVE, BUTTON, SCROLL, KEY -> MAX_CONTROL_MESSAGE
         else -> throw ProtocolException("unknown message tag $tag")
@@ -131,6 +136,11 @@ object Protocol {
                 body.u16(message.horizontal)
                 body.u16(message.vertical)
             }
+            is Message.Audio -> {
+                body.u8(AUDIO)
+                body.u64(message.ptsUs)
+                body.bytes(message.pcm)
+            }
             is Message.Key -> {
                 body.u8(KEY)
                 body.u16(message.code)
@@ -215,6 +225,7 @@ object Protocol {
             }
             SCROLL -> Message.Scroll(r.u16().toShort().toInt(), r.u16().toShort().toInt())
             KEY -> Message.Key(r.u16(), r.flag())
+            AUDIO -> Message.Audio(r.u64(), r.rest())
             else -> throw ProtocolException("unknown message tag $tag")
         }
         if (r.remaining() != 0) throw ProtocolException("message has trailing bytes")
@@ -355,4 +366,7 @@ sealed class Message {
 
     /** A Linux evdev key code: what Android reports as the scan code. */
     data class Key(val code: Int, val pressed: Boolean) : Message()
+
+    /** A chunk of the laptop's sound, in the format described at [Protocol.AUDIO_RATE]. */
+    class Audio(val ptsUs: Long, val pcm: ByteArray) : Message()
 }
