@@ -31,6 +31,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::approve::Approver;
 use crate::audio::AudioPipeline;
 use crate::capture::{Capture, CaptureBackend};
+use crate::events::{Events, ServerEvent, StreamStats, print_events};
 use crate::identity::{HostIdentity, PairedStore, fingerprint};
 use crate::pipeline::{EncodePipeline, EncodedFrame, StreamConfig, accepts_gpu_buffers};
 use crate::tls;
@@ -64,6 +65,7 @@ pub struct Server {
     capture: Arc<dyn CaptureBackend>,
     options: ServerOptions,
     busy: AtomicBool,
+    events: Events,
 }
 
 impl Server {
@@ -84,7 +86,18 @@ impl Server {
             capture,
             options,
             busy: AtomicBool::new(false),
+            events: print_events(),
         })
+    }
+
+    /// Report events here instead of printing them.
+    pub fn with_events(mut self, events: Events) -> Self {
+        self.events = events;
+        self
+    }
+
+    fn emit(&self, event: ServerEvent) {
+        (self.events)(event);
     }
 
     /// Accept one pairing with this window's token.
@@ -98,7 +111,10 @@ impl Server {
             let server = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = server.handle(tcp, peer).await {
-                    eprintln!("{peer}: {e}");
+                    server.emit(ServerEvent::Refused {
+                        peer: peer.to_string(),
+                        reason: e.to_string(),
+                    });
                 }
             });
         }
@@ -144,20 +160,32 @@ impl Server {
                 if let Err(why) = self.redeem(&token, client, &device_name) {
                     return reject(&mut writer, RejectReason::BadPairingToken, &why).await;
                 }
-                eprintln!("Paired with {device_name} ({peer}), fingerprint {client}");
+                self.emit(ServerEvent::Paired {
+                    name: device_name.clone(),
+                    fingerprint: client,
+                });
             }
             PairingRequest::Confirm { commitment } => {
                 let outcome = self
                     .confirm(&mut reader, &mut writer, commitment, client, &device_name)
                     .await?;
                 if let Err((reason, why)) = outcome {
-                    eprintln!("{peer}: pairing with {device_name} failed: {why}");
+                    self.emit(ServerEvent::Refused {
+                        peer: peer.to_string(),
+                        reason: format!("pairing with {device_name} failed: {why}"),
+                    });
                     return reject(&mut writer, reason, &why).await;
                 }
-                eprintln!("Paired with {device_name} ({peer}), fingerprint {client}");
+                self.emit(ServerEvent::Paired {
+                    name: device_name.clone(),
+                    fingerprint: client,
+                });
             }
             PairingRequest::None if !self.paired.load()?.contains(&client) => {
-                eprintln!("{peer}: refused unpaired device {client}");
+                self.emit(ServerEvent::Refused {
+                    peer: peer.to_string(),
+                    reason: format!("refused unpaired device {client}"),
+                });
                 return reject(
                     &mut writer,
                     RejectReason::NotPaired,
@@ -190,25 +218,32 @@ impl Server {
             Ok(capture) => capture,
             Err(why) => return reject(&mut writer, RejectReason::CaptureFailed, &why).await,
         };
-        eprintln!(
-            "Streaming to {device_name} ({peer}): {width}×{height} via {}",
-            self.options.encoder.element
-        );
+        self.emit(ServerEvent::Streaming {
+            name: device_name.clone(),
+            width,
+            height,
+            encoder: self.options.encoder.element.clone(),
+        });
         let result = stream_to(
-            capture.as_ref(),
-            &device_name,
-            &self.options.encoder,
-            StreamConfig {
-                bitrate_bps: default_bitrate(width, height, fps),
-                keyframe_interval: fps * KEYFRAME_SECONDS,
+            Stream {
+                events: &self.events,
+                capture: capture.as_ref(),
+                device_name: &device_name,
+                encoder: &self.options.encoder,
+                config: StreamConfig {
+                    bitrate_bps: default_bitrate(width, height, fps),
+                    keyframe_interval: fps * KEYFRAME_SECONDS,
+                },
+                size: (width, height),
             },
-            (width, height),
             reader,
             &mut writer,
         )
         .await;
         capture.stop().await;
-        eprintln!("{device_name} ({peer}) disconnected");
+        self.emit(ServerEvent::Disconnected {
+            name: device_name.clone(),
+        });
         result
     }
 
@@ -318,19 +353,29 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
-async fn stream_to<R, W>(
-    capture: &dyn Capture,
-    device_name: &str,
-    encoder: &EncoderSpec,
+/// What one streaming session needs.
+struct Stream<'a> {
+    events: &'a Events,
+    capture: &'a dyn Capture,
+    device_name: &'a str,
+    encoder: &'a EncoderSpec,
     config: StreamConfig,
-    (width, height): (u32, u32),
-    reader: R,
-    writer: &mut W,
-) -> io::Result<()>
+    size: (u32, u32),
+}
+
+async fn stream_to<R, W>(stream: Stream<'_>, reader: R, writer: &mut W) -> io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
+    let Stream {
+        events,
+        capture,
+        device_name,
+        encoder,
+        config,
+        size: (width, height),
+    } = stream;
     let (frame_tx, mut frames) = mpsc::channel::<EncodedFrame>(FRAME_QUEUE);
     let (keyframe_tx, mut keyframe_requests) = mpsc::unbounded_channel::<()>();
     let (error_tx, mut errors) = mpsc::unbounded_channel::<String>();
@@ -383,7 +428,7 @@ where
         AudioPipeline::start(&source, move |pts, pcm| {
             let _ = audio_tx.try_send((pts, pcm));
         })
-        .map_err(|e| eprintln!("  no sound for the tablet: {e}"))
+        .map_err(|e| events(ServerEvent::Note(format!("no sound for the tablet: {e}"))))
         .ok()
     });
 
@@ -430,7 +475,7 @@ where
                 // GPU buffers did not negotiate on this machine: retry once
                 // with copied frames before giving up.
                 if gpu_buffers && sent_total == 0 {
-                    eprintln!("  GPU buffers not available ({error}); copying frames instead");
+                    events(ServerEvent::Note(format!("GPU buffers not available ({error}); copying frames instead")));
                     gpu_buffers = false;
                     drop(pipeline.take());
                     captured_before = 0;
@@ -463,7 +508,7 @@ where
                             // what the portal reports, and replay this event
                             // as pointer input so the touch is not lost.
                             Err(e) if call.is_touch() && !input.is_emulating_touch() => {
-                                eprintln!("  touch not allowed by the desktop ({e}, for {call:?}); fingers now drive the pointer");
+                                events(ServerEvent::Note(format!("touch not allowed by the desktop ({e}); fingers now drive the pointer")));
                                 input.emulate_touch_with_pointer();
                                 for call in input.map(event) {
                                     let _ = capture.inject(call).await;
@@ -472,7 +517,7 @@ where
                             }
                             Err(e) => {
                                 if !std::mem::replace(&mut input_failed, true) {
-                                    eprintln!("  input not delivered: {e} ({call:?})");
+                                    events(ServerEvent::Note(format!("input not delivered: {e}")));
                                 }
                             }
                         }
@@ -499,7 +544,7 @@ where
                 let mut s = stats.lock().expect("stats");
                 s.captured = captured - captured_before;
                 captured_before = captured;
-                eprintln!("{}{}", s.summary(STATS_INTERVAL), if gpu_buffers { " · zero-copy" } else { "" });
+                events(ServerEvent::Stats(s.snapshot(STATS_INTERVAL, gpu_buffers)));
                 *s = Stats { rtt_us: s.rtt_us, ..Stats::default() };
             }
         }
@@ -526,16 +571,16 @@ struct Stats {
 }
 
 impl Stats {
-    fn summary(&self, over: Duration) -> String {
+    fn snapshot(&self, over: Duration, zero_copy: bool) -> StreamStats {
         let secs = over.as_secs_f64();
-        format!(
-            "  captured {:.0} fps · sent {:.0} fps · {:.1} Mbit/s · round trip {:.1} ms · dropped {}",
-            self.captured as f64 / secs,
-            self.frames as f64 / secs,
-            self.bytes as f64 * 8.0 / secs / 1e6,
-            self.rtt_us as f64 / 1000.0,
-            self.dropped
-        )
+        StreamStats {
+            captured_fps: self.captured as f64 / secs,
+            sent_fps: self.frames as f64 / secs,
+            mbps: self.bytes as f64 * 8.0 / secs / 1e6,
+            round_trip_ms: self.rtt_us as f64 / 1000.0,
+            dropped: self.dropped,
+            zero_copy,
+        }
     }
 }
 

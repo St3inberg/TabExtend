@@ -4,6 +4,7 @@ pub mod approve;
 pub mod audio;
 pub mod capture;
 pub mod doctor;
+pub mod events;
 pub mod identity;
 pub mod input_eis;
 pub mod mdns;
