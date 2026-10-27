@@ -15,13 +15,16 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use ashpd::desktop::remote_desktop::{
-    Axis, DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions, StartOptions,
+    Axis, ConnectToEISOptions, DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions,
+    StartOptions,
 };
 use ashpd::desktop::screencast::{
     CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
 };
 use ashpd::desktop::{CreateSessionOptions, PersistMode, Session};
 use tabextend_core::input::{InputCall, ScrollAxis};
+
+use crate::input_eis::EisInput;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -188,9 +191,32 @@ impl PortalVirtualMonitor {
             .size()
             .filter(|(w, h)| *w > 0 && *h > 0)
             .map_or((width.into(), height.into()), |(w, h)| (w.into(), h.into()));
+        let mapping_id = stream.mapping_id().map(str::to_owned);
         let fd = cast
             .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
             .await?;
+        // Input through libei where the portal offers it (version 2+): the
+        // portal's own pointer and touch methods reject every position on
+        // a virtual monitor. Fall back to them otherwise.
+        let eis = if remote.version() >= 2 {
+            match remote
+                .connect_to_eis(&session, ConnectToEISOptions::default())
+                .await
+            {
+                Ok(eis_fd) => EisInput::connect(eis_fd, mapping_id, logical)
+                    .await
+                    .map_err(|e| {
+                        eprintln!("note: libei input unavailable ({e}); using portal input")
+                    })
+                    .ok(),
+                Err(e) => {
+                    eprintln!("note: libei input unavailable ({e}); using portal input");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(PortalCapture {
             remote,
             session,
@@ -199,6 +225,7 @@ impl PortalVirtualMonitor {
             width,
             height,
             logical,
+            eis,
         })
     }
 
@@ -242,6 +269,7 @@ struct PortalCapture {
     width: u32,
     height: u32,
     logical: (f64, f64),
+    eis: Option<EisInput>,
 }
 
 fn key_state(pressed: bool) -> KeyState {
@@ -279,6 +307,10 @@ impl Capture for PortalCapture {
     }
 
     fn inject(&self, call: InputCall) -> BoxFuture<'_, Result<(), String>> {
+        if let Some(eis) = &self.eis {
+            let result = eis.inject(call);
+            return Box::pin(async move { result });
+        }
         Box::pin(async move {
             let (remote, session, node) = (&self.remote, &self.session, self.node);
             match call {

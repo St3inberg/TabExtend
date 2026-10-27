@@ -991,6 +991,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "reis"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b967ec6489a42067a20724f11987bb96178ea796873cbe1afd25fb93ee6f85f"
+dependencies = [
+ "enumflags2",
+ "futures-util",
+ "log",
+ "rustix",
+ "tokio",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1236,10 +1249,13 @@ name = "tabextend-host"
 version = "0.1.0"
 dependencies = [
  "ashpd",
+ "futures-util",
  "getrandom 0.4.3",
  "gstreamer",
  "qrcode",
  "rcgen",
+ "reis",
+ "rustix",
  "rustls",
  "sha2",
  "tabextend-core",
