@@ -105,6 +105,11 @@ impl Server {
         *self.pairing.lock().expect("pairing lock") = Some(window);
     }
 
+    /// Stop accepting pairings.
+    pub fn close_pairing(&self) {
+        *self.pairing.lock().expect("pairing lock") = None;
+    }
+
     pub async fn run(self: Arc<Self>, listener: TcpListener) -> io::Result<()> {
         loop {
             let (tcp, peer) = listener.accept().await?;

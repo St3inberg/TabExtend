@@ -11,5 +11,7 @@ pub mod mdns;
 pub mod pipeline;
 pub mod portals;
 pub mod probe;
+pub mod runner;
 pub mod server;
+pub mod settings;
 pub mod tls;

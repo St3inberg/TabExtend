@@ -1,25 +1,19 @@
 use std::env;
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::IpAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Instant;
 
 use qrcode::QrCode;
 use qrcode::render::{svg, unicode};
 use tabextend_core::check::Status;
-use tabextend_core::encoder::{default_h264_encoders, select_encoder};
-use tabextend_core::pairing::{Fingerprint, PairingLink, PairingWindow};
-use tabextend_core::protocol::PAIRING_TOKEN_LEN;
+use tabextend_core::pairing::{Fingerprint, PairingLink};
 use tabextend_host::approve::{Approver, FixedAnswer, TerminalPrompt};
-use tabextend_host::capture::{CaptureBackend, PortalVirtualMonitor, TestPattern};
+use tabextend_host::capture::PortalVirtualMonitor;
 use tabextend_host::doctor;
-use tabextend_host::identity::{HostIdentity, PairedStore, default_data_dir};
-use tabextend_host::mdns::{self, Announcement};
-use tabextend_host::probe::GstProbe;
-use tabextend_host::server::{Server, ServerOptions};
-use tokio::net::TcpListener;
-
-const DEFAULT_PORT: u16 = 47420;
+use tabextend_host::events::print_events;
+use tabextend_host::identity::{PairedStore, default_data_dir};
+use tabextend_host::runner::{HostConfig, RunningHost};
+use tabextend_host::settings::Settings;
 
 const USAGE: &str = "\
 Usage: tabextend <command> [options]
@@ -140,38 +134,20 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Options>, Str
     Ok(Some(options))
 }
 
-/// The address other devices on the LAN reach this machine at: the source
-/// address of the default route. Connecting a UDP socket sends nothing.
-fn lan_address() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?;
-    Some(socket.local_addr().ok()?.ip())
-}
-
 fn run_server(options: &Options, pairing: bool) -> Result<(), String> {
     let data_dir = default_data_dir().map_err(|e| e.to_string())?;
-    let identity = HostIdentity::load_or_create(&data_dir).map_err(|e| e.to_string())?;
     let paired = PairedStore::new(&data_dir).map_err(|e| e.to_string())?;
     if !pairing && paired.load().map_err(|e| e.to_string())?.is_empty() {
         return Err("no tablet is paired yet; run `tabextend pair` first".into());
     }
-
-    let probe = GstProbe::new(1280, 800).map_err(|e| e.to_string())?;
-    let encoder = select_encoder(&probe, &default_h264_encoders(), options.encoder.as_deref())
-        .map_err(|e| format!("{e}; run `tabextend doctor` for details"))?;
-    eprintln!("Encoder: {} ({})", encoder.element, encoder.backend);
-
-    let ip = options
-        .listen
-        .or_else(lan_address)
-        .ok_or("cannot find this machine's network address; use --listen")?;
-    let address = SocketAddr::new(ip, options.port.unwrap_or(DEFAULT_PORT));
-
-    let capture: Arc<dyn CaptureBackend> = if options.test_pattern {
-        Arc::new(TestPattern::default())
-    } else {
-        let state_dir = data_dir.join("state");
-        Arc::new(PortalVirtualMonitor::new(state_dir))
+    // Flags win over the settings saved by the desktop app.
+    let settings = Settings::load(&data_dir);
+    let config = HostConfig {
+        encoder: options.encoder.clone().or(settings.encoder),
+        listen: options.listen,
+        port: options.port,
+        max_width: options.max_width.or(settings.max_width),
+        test_pattern: options.test_pattern,
     };
     // Only `pair` can approve a tablet; `serve` refuses every request.
     let approver: Arc<dyn Approver> = if pairing {
@@ -179,73 +155,27 @@ fn run_server(options: &Options, pairing: bool) -> Result<(), String> {
     } else {
         Arc::new(FixedAnswer(false))
     };
-    let server = Server::new(
-        &identity,
-        paired,
-        approver,
-        capture,
-        ServerOptions {
-            encoder,
-            max_width: options.max_width,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-
-    if pairing {
-        let mut token = [0u8; PAIRING_TOKEN_LEN];
-        getrandom::fill(&mut token).map_err(|e| e.to_string())?;
-        server.open_pairing(PairingWindow::open(token, Instant::now()));
-        show_pairing(&PairingLink {
-            host: match ip {
-                IpAddr::V4(v4) => v4.to_string(),
-                IpAddr::V6(v6) => format!("[{v6}]"),
-            },
-            port: address.port(),
-            fingerprint: identity.fingerprint,
-            token,
-        });
-    }
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async move {
-        let listener = TcpListener::bind(address)
-            .await
-            .map_err(|e| format!("cannot listen on {address}: {e}"))?;
+        let mut host = RunningHost::start(&config, approver, print_events()).await?;
         eprintln!(
-            "Listening on {address} · host fingerprint {}",
-            identity.fingerprint
+            "Encoder: {} ({})",
+            host.encoder.element, host.encoder.backend
         );
-        // Pairing announces the computer's name so tablets can list it;
-        // otherwise only a short id, for paired tablets to find it again.
-        let name = if pairing {
-            Some(mdns::computer_name().await)
+        eprintln!(
+            "Listening on {} · host fingerprint {}",
+            host.address, host.fingerprint
+        );
+        if pairing {
+            let (link, name) = host.open_pairing().await?;
+            show_pairing(&link);
+            eprintln!("Or, on the tablet, tap \"Find computers\" and pick \"{name}\".");
         } else {
-            None
-        };
-        let announcement = Announcement {
-            port: address.port(),
-            id: mdns::host_id(&identity.fingerprint),
-            pairing_name: name.clone(),
-        };
-        let _advertisement = match mdns::advertise(&announcement).await {
-            Ok(advertisement) => {
-                if let Some(name) = &name {
-                    eprintln!("Or, on the tablet, tap \"Find computers\" and pick \"{name}\".");
-                }
-                Some(advertisement)
-            }
-            Err(e) => {
-                eprintln!(
-                    "note: not announced on the network ({e}); tablets cannot find it by scanning"
-                );
-                None
-            }
-        };
-        if !pairing {
             eprintln!("Waiting for a paired tablet. Ctrl+C to stop.");
         }
         tokio::select! {
-            result = Arc::new(server).run(listener) => result.map_err(|e| e.to_string()),
+            result = host.wait() => result.map_err(|e| e.to_string()),
             _ = tokio::signal::ctrl_c() => Ok(()),
         }
     })
