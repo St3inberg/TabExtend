@@ -298,8 +298,8 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         panel.visibility = View.VISIBLE
     }
 
-    override fun onStats(fps: Double, mbps: Double) = runOnUiThread {
-        stats.text = getString(R.string.stats, fps, mbps)
+    override fun onStats(fps: Double, mbps: Double, decodeMs: Double) = runOnUiThread {
+        stats.text = getString(R.string.stats, fps, mbps, decodeMs)
     }
 
     override fun onGaveUp(reason: String) {

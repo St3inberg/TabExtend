@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use gst::prelude::*;
 use gstreamer as gst;
 use tabextend_core::encoder::EncoderSpec;
+use tabextend_core::h264::low_delay_access_unit;
 
 /// Element name the encoder gets inside the pipeline.
 const ENCODER_NAME: &str = "encoder";
@@ -137,10 +138,17 @@ impl EncodePipeline {
                 let sample = sink.emit_by_name::<Option<gst::Sample>>("pull-sample", &[])?;
                 let buffer = sample.buffer()?;
                 let map = buffer.map_readable().ok()?;
+                let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
+                // Keyframes carry the SPS; make it promise low-latency
+                // decoding so the tablet shows each frame at once.
+                let data = keyframe
+                    .then(|| low_delay_access_unit(map.as_slice()))
+                    .flatten()
+                    .unwrap_or_else(|| map.as_slice().to_vec());
                 on_frame(EncodedFrame {
                     pts_us: buffer.pts().map_or(0, |t| t.useconds()),
-                    keyframe: !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT),
-                    data: map.as_slice().to_vec(),
+                    keyframe,
+                    data,
                 });
                 Some(gst::FlowReturn::Ok)
             })()

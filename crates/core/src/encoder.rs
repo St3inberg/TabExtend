@@ -97,7 +97,9 @@ impl EncoderSpec {
 /// block with lower latency and power. Hardware encoders come before software.
 ///
 /// Settings favour latency over compression: no B-frames (they make the
-/// decoder wait for later frames), constant bitrate, fastest presets.
+/// decoder wait for later frames), one reference frame (so decoders that
+/// size their buffer from the stream hold almost nothing), constant
+/// bitrate, fastest presets.
 pub fn default_h264_encoders() -> Vec<EncoderSpec> {
     let va = |element: &str, backend: &str| {
         EncoderSpec::new(element, backend, true)
@@ -105,6 +107,7 @@ pub fn default_h264_encoders() -> Vec<EncoderSpec> {
             .tune(&[
                 ("rate-control", "cbr"),
                 ("b-frames", "0"),
+                ("ref-frames", "1"),
                 ("target-usage", "7"),
             ])
             .bitrate_property("bitrate", 1000)
@@ -126,6 +129,7 @@ pub fn default_h264_encoders() -> Vec<EncoderSpec> {
         EncoderSpec::new("qsvh264enc", "Quick Sync (Intel)", true)
             .tune(&[
                 ("b-frames", "0"),
+                ("ref-frames", "1"),
                 ("target-usage", "7"),
                 ("rate-control", "cbr"),
             ])
@@ -136,6 +140,7 @@ pub fn default_h264_encoders() -> Vec<EncoderSpec> {
                 ("tune", "zerolatency"),
                 ("speed-preset", "ultrafast"),
                 ("bframes", "0"),
+                ("ref", "1"),
             ])
             .bitrate_property("bitrate", 1000)
             .keyframe_property("key-int-max"),

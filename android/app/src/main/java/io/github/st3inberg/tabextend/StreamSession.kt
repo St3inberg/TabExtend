@@ -52,7 +52,7 @@ class StreamSession(
         fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean)
         fun onPaired(host: Host)
         fun onConfirmCode(code: String, computer: String)
-        fun onStats(fps: Double, mbps: Double)
+        fun onStats(fps: Double, mbps: Double, decodeMs: Double)
         fun onGaveUp(reason: String)
     }
 
@@ -162,7 +162,7 @@ class StreamSession(
             outbox.clear()
             val writer = Thread({ writeLoop(output) }, "tabextend-writer").apply { start() }
             streaming = true
-            listener.onStreaming(width, height, decoder.name, decoder.lowLatency)
+            listener.onStreaming(width, height, decoder.name, decoder.lowLatency || decoder.vendorLowLatency.isNotEmpty())
             try {
                 stream(input, decoder)
             } finally {
@@ -214,7 +214,11 @@ class StreamSession(
             val now = System.nanoTime()
             val elapsed = (now - windowStart) / 1e9
             if (elapsed >= 1.0) {
-                listener.onStats((decoder.framesRendered - windowFrames) / elapsed, windowBytes * 8 / elapsed / 1e6)
+                listener.onStats(
+                    (decoder.framesRendered - windowFrames) / elapsed,
+                    windowBytes * 8 / elapsed / 1e6,
+                    decoder.takeAverageDecodeMs(),
+                )
                 windowStart = now
                 windowFrames = decoder.framesRendered
                 windowBytes = 0

@@ -46,12 +46,12 @@ for desktops whose EIS lacks touch.
 Also worth reporting upstream: the portal could skip or defer the position
 check for virtual streams.
 
-### Frame rate
+### Frame rate: fixed
 
-Moving content reaches about 12–16 fps; the network is not the limit (no
-drops, round trip under 15 ms). The stats line shows captured and sent fps
-separately to locate it. Measure again once input works, since injected
-input is the easiest way to produce steady motion.
+Moving content now captures and sends 60 fps, with about 10 ms in the
+tablet's decoder. The causes and fixes (decoder buffering, an output loop
+that held finished frames back, encoder reference frames) are written up in
+[video-pipeline.md](video-pipeline.md).
 
 ### Not started
 

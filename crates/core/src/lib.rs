@@ -5,6 +5,7 @@
 
 pub mod check;
 pub mod encoder;
+pub mod h264;
 pub mod input;
 pub mod pairing;
 pub mod portal;
