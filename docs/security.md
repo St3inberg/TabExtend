@@ -37,10 +37,30 @@ an unlocked device.
   has not pinned, so an attacker on the network cannot impersonate the host.
 - Pairing exchanges and stores the tablet's public key on the host. After
   that, only pinned keys can connect: mutual authentication, no passwords.
-- The pairing secret is single-use and expires after 2 minutes. The 6-digit
-  code fallback is rate-limited (lockout after 5 wrong attempts) because six
-  digits can be brute-forced otherwise.
+- The pairing secret is single-use and expires after 2 minutes; 5 wrong
+  tokens close the pairing window.
 - The host lists paired tablets and can revoke each one.
+
+**Pairing by code** (no camera needed). The tablet finds the host over mDNS,
+so it does not know the host's certificate in advance. Both screens show a
+6-digit code and the user approves on the computer:
+
+1. The tablet sends a commitment: a hash of a secret random nonce.
+2. The host sends its own random nonce.
+3. The tablet reveals its nonce; the host checks it against the commitment.
+4. Both compute the code from both certificate fingerprints and both nonces
+   (domain-separated SHA-256, `crates/core/src/pairing.rs`).
+
+A machine in the middle holds a different certificate on each side, so the
+codes differ unless it guesses. Because the tablet commits before seeing the
+host's nonce, the attacker cannot grind keys or nonces to make the codes
+match: it gets one guess in a million per attempt. Approval happens on the
+computer, which grants access, never on the tablet. Only one request is
+shown at a time; refusals, failed reveals and timeouts count toward the 5
+failures that close the window, so strangers cannot keep asking.
+
+Typing a code into the tablet instead was rejected: without a PAKE, a
+machine in the middle would see the typed code and could relay it.
 
 ### Transport
 
@@ -51,8 +71,10 @@ an unlocked device.
   tablet, and only on the interface it was told to use (Wi-Fi, Wi-Fi Direct
   or USB), never `0.0.0.0` by default.
 - Unauthenticated peers get no response beyond the TLS handshake failure.
-- mDNS announces only a service name and port. No user name, host name or
-  screen details.
+- mDNS announces the service and port. While pairing (`tabextend pair`) it
+  also announces the computer's name, so the user can pick it; otherwise
+  only a short id derived from the host certificate, so a paired tablet can
+  find its host again without strangers learning whose computer it is.
 
 ### Input
 
@@ -100,6 +122,6 @@ the firewall, with rules that expire on their own after 2 hours.
 | Security policy and private reporting | done |
 | `cargo deny`, Dependabot, pinned actions, read-only CI token | done |
 | Test scripts: backup, rollback, firewall restriction | done |
-| Pairing, encryption, interface binding | design only, M1/M3 |
-| Input clipping | design only, M2 |
+| Pairing by QR code, link or code; TLS 1.3 with pinning; interface binding | done |
+| Input clipping, release on disconnect | done (delivery blocked, issue #1) |
 | Fuzzing the protocol parser | planned before M5 |

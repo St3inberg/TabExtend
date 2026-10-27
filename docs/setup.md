@@ -51,8 +51,9 @@ will need to pair again.
    ./tabextend pair
    ```
 
-   Scan the QR code with the tablet's camera (or copy the link and use
-   "Paste pairing link" in the app). The first time, GNOME asks to share the
+   In the app, tap **Scan QR code** and point the camera at the QR code.
+   Or tap **Find computers**, pick your computer, check both screens show
+   the same 6-digit code, and type `y` on the computer. The first time, GNOME asks to share the
    screen: turn on **Allow remote interaction**, then share. Afterwards,
    `./tabextend serve` is enough.
 

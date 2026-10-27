@@ -22,6 +22,7 @@ object Protocol {
     const val MAX_CONTROL_MESSAGE = 4096
     const val MAX_NAME = 64
     const val PAIRING_TOKEN_LEN = 16
+    const val NONCE_LEN = 32
     private const val HEADER_LEN = 4
 
     private const val HELLO = 1
@@ -52,13 +53,18 @@ object Protocol {
             is Message.Hello -> {
                 body.u8(HELLO)
                 body.u16(message.version)
-                val token = message.pairingToken
-                if (token == null) {
-                    body.u8(0)
-                } else {
-                    require(token.size == PAIRING_TOKEN_LEN)
-                    body.u8(1)
-                    body.bytes(token)
+                when (val pairing = message.pairing) {
+                    PairingRequest.None -> body.u8(0)
+                    is PairingRequest.Token -> {
+                        require(pairing.token.size == PAIRING_TOKEN_LEN)
+                        body.u8(1)
+                        body.bytes(pairing.token)
+                    }
+                    is PairingRequest.Confirm -> {
+                        require(pairing.commitment.size == NONCE_LEN)
+                        body.u8(2)
+                        body.bytes(pairing.commitment)
+                    }
                 }
                 body.string(message.deviceName.take(MAX_NAME))
                 body.u32(message.display.width)
@@ -95,6 +101,14 @@ object Protocol {
                 body.u64(message.sentUs)
             }
             Message.RequestKeyframe -> body.u8(REQUEST_KEYFRAME)
+            is Message.PairChallenge -> {
+                body.u8(PAIR_CHALLENGE)
+                body.bytes(message.nonce)
+            }
+            is Message.PairReveal -> {
+                body.u8(PAIR_REVEAL)
+                body.bytes(message.nonce)
+            }
             is Message.Touch -> {
                 body.u8(TOUCH)
                 body.u8(message.slot)
@@ -148,13 +162,14 @@ object Protocol {
         val message = when (tag) {
             HELLO -> {
                 val version = r.u16()
-                val token = when (val flag = r.u8()) {
-                    0 -> null
-                    1 -> r.bytes(PAIRING_TOKEN_LEN)
-                    else -> throw ProtocolException("unknown token flag $flag")
+                val pairing = when (val flag = r.u8()) {
+                    0 -> PairingRequest.None
+                    1 -> PairingRequest.Token(r.bytes(PAIRING_TOKEN_LEN))
+                    2 -> PairingRequest.Confirm(r.bytes(NONCE_LEN))
+                    else -> throw ProtocolException("unknown pairing mode $flag")
                 }
                 Message.Hello(
-                    version, token, r.string(MAX_NAME),
+                    version, pairing, r.string(MAX_NAME),
                     DisplayInfo(r.u32(), r.u32(), r.u32(), r.u32()),
                 )
             }
@@ -182,6 +197,8 @@ object Protocol {
             PING -> Message.Ping(r.u32(), r.u64())
             PONG -> Message.Pong(r.u32(), r.u64())
             REQUEST_KEYFRAME -> Message.RequestKeyframe
+            PAIR_CHALLENGE -> Message.PairChallenge(r.bytes(NONCE_LEN))
+            PAIR_REVEAL -> Message.PairReveal(r.bytes(NONCE_LEN))
             TOUCH -> {
                 val slot = r.u8()
                 val code = r.u8()
@@ -283,6 +300,17 @@ data class DisplayInfo(
     val refreshMillihz: Long,
 )
 
+/** How a tablet asks to be trusted, if it is not paired yet. */
+sealed class PairingRequest {
+    data object None : PairingRequest()
+
+    /** The single-use token from the host's QR code. */
+    class Token(val token: ByteArray) : PairingRequest()
+
+    /** Pairing by code: a commitment to the tablet's secret nonce. See [PairingCode]. */
+    class Confirm(val commitment: ByteArray) : PairingRequest()
+}
+
 enum class TouchPhase(val code: Int) { DOWN(0), MOVE(1), UP(2), CANCEL(3) }
 
 enum class MouseButton(val code: Int) { LEFT(1), MIDDLE(2), RIGHT(3), BACK(4), FORWARD(5) }
@@ -299,10 +327,16 @@ enum class RejectReason(val code: Int) {
 sealed class Message {
     class Hello(
         val version: Int,
-        val pairingToken: ByteArray?,
+        val pairing: PairingRequest,
         val deviceName: String,
         val display: DisplayInfo,
     ) : Message()
+
+    /** Host → tablet during code pairing: the host's random nonce. */
+    class PairChallenge(val nonce: ByteArray) : Message()
+
+    /** Tablet → host after the challenge: the nonce it committed to. */
+    class PairReveal(val nonce: ByteArray) : Message()
 
     data class Welcome(val version: Int, val width: Long, val height: Long) : Message()
     data class Reject(val reason: RejectReason, val detail: String) : Message()

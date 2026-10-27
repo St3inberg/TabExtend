@@ -40,12 +40,12 @@ class ProtocolTest {
     @Test
     fun helloRoundTripsWithAndWithoutToken() {
         val token = ByteArray(16) { 7 }
-        val hello = roundTrip(Message.Hello(1, token, "Idea Tab", display)) as Message.Hello
-        assertArrayEquals(token, hello.pairingToken)
+        val hello = roundTrip(Message.Hello(1, PairingRequest.Token(token), "Idea Tab", display)) as Message.Hello
+        assertArrayEquals(token, (hello.pairing as PairingRequest.Token).token)
         assertEquals("Idea Tab", hello.deviceName)
         assertEquals(display, hello.display)
-        val plain = roundTrip(Message.Hello(1, null, "", display)) as Message.Hello
-        assertNull(plain.pairingToken)
+        val plain = roundTrip(Message.Hello(1, PairingRequest.None, "", display)) as Message.Hello
+        assertEquals(PairingRequest.None, plain.pairing)
     }
 
     @Test
@@ -59,7 +59,7 @@ class ProtocolTest {
 
     @Test
     fun longDeviceNamesAreCutToTheLimit() {
-        val hello = roundTrip(Message.Hello(1, null, "x".repeat(200), display)) as Message.Hello
+        val hello = roundTrip(Message.Hello(1, PairingRequest.None, "x".repeat(200), display)) as Message.Hello
         assertEquals(Protocol.MAX_NAME, hello.deviceName.length)
     }
 

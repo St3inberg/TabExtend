@@ -10,9 +10,11 @@ use tabextend_core::check::Status;
 use tabextend_core::encoder::{default_h264_encoders, select_encoder};
 use tabextend_core::pairing::{Fingerprint, PairingLink, PairingWindow};
 use tabextend_core::protocol::PAIRING_TOKEN_LEN;
+use tabextend_host::approve::{Approver, FixedAnswer, TerminalPrompt};
 use tabextend_host::capture::{CaptureBackend, PortalVirtualMonitor, TestPattern};
 use tabextend_host::doctor;
 use tabextend_host::identity::{HostIdentity, PairedStore, default_data_dir};
+use tabextend_host::mdns::{self, Announcement};
 use tabextend_host::probe::GstProbe;
 use tabextend_host::server::{Server, ServerOptions};
 use tokio::net::TcpListener;
@@ -171,9 +173,16 @@ fn run_server(options: &Options, pairing: bool) -> Result<(), String> {
         let state_dir = data_dir.join("state");
         Arc::new(PortalVirtualMonitor::new(state_dir))
     };
+    // Only `pair` can approve a tablet; `serve` refuses every request.
+    let approver: Arc<dyn Approver> = if pairing {
+        Arc::new(TerminalPrompt::new())
+    } else {
+        Arc::new(FixedAnswer(false))
+    };
     let server = Server::new(
         &identity,
         paired,
+        approver,
         capture,
         ServerOptions {
             encoder,
@@ -206,6 +215,32 @@ fn run_server(options: &Options, pairing: bool) -> Result<(), String> {
             "Listening on {address} · host fingerprint {}",
             identity.fingerprint
         );
+        // Pairing announces the computer's name so tablets can list it;
+        // otherwise only a short id, for paired tablets to find it again.
+        let name = if pairing {
+            Some(mdns::computer_name().await)
+        } else {
+            None
+        };
+        let announcement = Announcement {
+            port: address.port(),
+            id: mdns::host_id(&identity.fingerprint),
+            pairing_name: name.clone(),
+        };
+        let _advertisement = match mdns::advertise(&announcement).await {
+            Ok(advertisement) => {
+                if let Some(name) = &name {
+                    eprintln!("Or, on the tablet, tap \"Find computers\" and pick \"{name}\".");
+                }
+                Some(advertisement)
+            }
+            Err(e) => {
+                eprintln!(
+                    "note: not announced on the network ({e}); tablets cannot find it by scanning"
+                );
+                None
+            }
+        };
         if !pairing {
             eprintln!("Waiting for a paired tablet. Ctrl+C to stop.");
         }

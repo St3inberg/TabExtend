@@ -1,12 +1,14 @@
 # Status
 
-Work in progress. Last updated 2026-10-23, on the reference hardware
+Work in progress. Last updated 2026-10-27, on the reference hardware
 (Fedora 44, GNOME 50.6, Lenovo Idea Tab TB336FU).
 
 ## Works
 
-- **Pairing** by QR code or pairing link: TLS 1.3, both certificates
-  pinned, the tablet's key in Android Keystore.
+- **Pairing three ways**, all over TLS 1.3 with both certificates pinned
+  and the tablet's key in Android Keystore: scan the QR code with the
+  app's camera scanner, paste the pairing link, or pick the computer from
+  the network and compare a 6-digit code (approve on the computer).
 - **Extended monitor over Wi-Fi.** GNOME adds a virtual monitor next to the
   laptop screen; windows dragged onto it show on the tablet.
 - **Stream sized by the tablet's decoder.** The TB336FU's H.264 decoder
@@ -53,9 +55,8 @@ input is the easiest way to produce steady motion.
 
 ### Not started
 
-- Scan-and-confirm pairing: protocol and code derivation are done and
-  tested (`crates/core/src/pairing.rs`); host prompt, mDNS and the tablet's
-  list of computers are not.
+- Finding the paired host again by its id when its address changes.
+- Desktops other than GNOME (KDE Plasma next).
 - Scale and placement of the virtual monitor (text is small at scale 1).
 - Pen pressure (no pen device in the portal or libei yet).
 

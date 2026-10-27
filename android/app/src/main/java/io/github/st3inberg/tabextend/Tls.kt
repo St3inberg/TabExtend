@@ -54,16 +54,31 @@ object Tls {
         return MessageDigest.getInstance("SHA-256").digest(cert.encoded)
     }
 
-    fun connect(host: Host): SSLSocket {
+    /** Connect to a paired host; only its pinned certificate is accepted. */
+    fun connect(host: Host): SSLSocket = open(host.address, host.port, PinnedHost(host.fingerprint))
+
+    /**
+     * Connect to a host found by scanning, whose certificate is not known
+     * yet. The certificate is recorded, not trusted: its fingerprint goes
+     * into the pairing code, so a swapped certificate shows up as codes that
+     * do not match. Returns the socket and the host's fingerprint.
+     */
+    fun connectForPairing(address: String, port: Int): Pair<SSLSocket, ByteArray> {
+        val recorder = RecordingHost()
+        val socket = open(address, port, recorder)
+        return socket to (recorder.fingerprint ?: throw CertificateException("host sent no certificate"))
+    }
+
+    private fun open(address: String, port: Int, trust: X509TrustManager): SSLSocket {
         ensureClientKey()
         val context = SSLContext.getInstance("TLSv1.3").apply {
-            init(arrayOf(KeystoreKey(keyStore())), arrayOf(PinnedHost(host.fingerprint)), null)
+            init(arrayOf(KeystoreKey(keyStore())), arrayOf(trust), null)
         }
         val tcp = Socket().apply {
             tcpNoDelay = true
-            connect(InetSocketAddress(host.address.trim('[', ']'), host.port), CONNECT_TIMEOUT_MS)
+            connect(InetSocketAddress(address.trim('[', ']'), port), CONNECT_TIMEOUT_MS)
         }
-        val socket = context.socketFactory.createSocket(tcp, host.address, host.port, true) as SSLSocket
+        val socket = context.socketFactory.createSocket(tcp, address, port, true) as SSLSocket
         socket.enabledProtocols = arrayOf("TLSv1.3")
         socket.sslParameters = socket.sslParameters.apply {
             applicationProtocols = arrayOf("tabextend/1")
@@ -90,6 +105,27 @@ object Tls {
         override fun getServerAliases(type: String?, issuers: Array<out Principal>?): Array<String>? = null
 
         override fun chooseServerAlias(type: String?, issuers: Array<out Principal>?, socket: Socket?): String? = null
+    }
+
+    /**
+     * Records the host's certificate for pairing by code. Lint warns about
+     * trust managers that accept anything; here the fingerprint is checked
+     * by the user, through the code shown on both screens, before the host
+     * is trusted, and only pinned hosts are used afterwards.
+     */
+    @SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
+    private class RecordingHost : X509TrustManager {
+        @Volatile var fingerprint: ByteArray? = null
+
+        override fun checkServerTrusted(chain: Array<out X509Certificate>, authType: String) {
+            val leaf = chain.firstOrNull() ?: throw CertificateException("host sent no certificate")
+            fingerprint = MessageDigest.getInstance("SHA-256").digest(leaf.encoded)
+        }
+
+        override fun checkClientTrusted(chain: Array<out X509Certificate>, authType: String) =
+            throw CertificateException("not a server")
+
+        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
     }
 
     /**

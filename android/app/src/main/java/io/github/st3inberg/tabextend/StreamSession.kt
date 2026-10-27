@@ -10,17 +10,38 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocket
 
+/** Who to connect to, and how this tablet proves it may. */
+sealed class Target {
+    abstract val address: String
+    abstract val port: Int
+
+    /** Paired before: both certificates are pinned. */
+    data class Paired(val host: Host) : Target() {
+        override val address get() = host.address
+        override val port get() = host.port
+    }
+
+    /** From a QR code or pairing link: certificate pinned, single-use token. */
+    class WithToken(val host: Host, val token: ByteArray) : Target() {
+        override val address get() = host.address
+        override val port get() = host.port
+    }
+
+    /** Found by scanning: pair by comparing a code shown on both screens. */
+    data class ByCode(override val address: String, override val port: Int, val name: String) : Target()
+}
+
 /**
  * One tablet's connection to its host, on a background thread: connect,
  * say hello, decode video until the connection ends, then reconnect.
  *
  * Gives up (no more retries) only when retrying cannot help: the host
- * does not know this tablet, the pairing code was refused, or the
- * versions do not match.
+ * does not know this tablet, pairing was refused, or the versions do not
+ * match. Pairing by code never retries on its own, since each attempt
+ * puts a question on the computer's screen.
  */
 class StreamSession(
-    private val host: Host,
-    private var pairingToken: ByteArray?,
+    @Volatile private var target: Target,
     private val deviceName: String,
     private val display: DisplayInfo,
     private val surface: Surface,
@@ -29,7 +50,8 @@ class StreamSession(
     interface Listener {
         fun onStatus(text: String)
         fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean)
-        fun onPaired()
+        fun onPaired(host: Host)
+        fun onConfirmCode(code: String, computer: String)
         fun onStats(fps: Double, mbps: Double)
         fun onGaveUp(reason: String)
     }
@@ -61,14 +83,15 @@ class StreamSession(
         while (running) {
             val outcome = try {
                 connectOnce()
-            } catch (e: IOException) {
-                if (!running) return
-                listener.onStatus("Connection lost: ${e.message ?: e.javaClass.simpleName}")
-                Outcome.Retry
             } catch (e: Exception) {
                 if (!running) return
-                listener.onStatus("Error: ${e.message ?: e.javaClass.simpleName}")
-                Outcome.Retry
+                val why = e.message ?: e.javaClass.simpleName
+                if (target is Target.ByCode) {
+                    Outcome.GiveUp("Pairing failed: $why")
+                } else {
+                    listener.onStatus(if (e is IOException) "Connection lost: $why" else "Error: $why")
+                    Outcome.Retry
+                }
             }
             when (outcome) {
                 is Outcome.GiveUp -> {
@@ -85,7 +108,7 @@ class StreamSession(
                 return
             }
             backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
-            listener.onStatus("Reconnecting to ${host.address}…")
+            listener.onStatus("Reconnecting to ${target.address}…")
         }
     }
 
@@ -96,22 +119,42 @@ class StreamSession(
     }
 
     private fun connectOnce(): Outcome {
-        listener.onStatus("Connecting to ${host.address}…")
-        val tls = Tls.connect(host)
+        val current = target
+        listener.onStatus("Connecting to ${current.address}…")
+        val (tls, hostFingerprint) = when (current) {
+            is Target.Paired -> Tls.connect(current.host) to current.host.fingerprint
+            is Target.WithToken -> Tls.connect(current.host) to current.host.fingerprint
+            is Target.ByCode -> Tls.connectForPairing(current.address, current.port)
+        }
         socket = tls
         tls.use {
             val output = BufferedOutputStream(tls.outputStream)
             val input = DataInputStream(BufferedInputStream(tls.inputStream, 256 * 1024))
-            send(output, Message.Hello(Protocol.VERSION, pairingToken, deviceName, display))
+            val nonce = PairingCode.newNonce()
+            val request = when (current) {
+                is Target.Paired -> PairingRequest.None
+                is Target.WithToken -> PairingRequest.Token(current.token)
+                is Target.ByCode -> PairingRequest.Confirm(PairingCode.commitment(nonce))
+            }
+            send(output, Message.Hello(Protocol.VERSION, request, deviceName, display))
 
-            val welcome = when (val first = Protocol.read(input)) {
+            var first = Protocol.read(input)
+            if (current is Target.ByCode && first is Message.PairChallenge) {
+                send(output, Message.PairReveal(nonce))
+                val code = PairingCode.code(hostFingerprint, Tls.clientFingerprint(), first.nonce, nonce)
+                listener.onConfirmCode(PairingCode.format(code), current.name)
+                first = Protocol.read(input) // the user has up to 90 s to answer
+            }
+            val welcome = when (first) {
                 is Message.Welcome -> first
                 is Message.Reject -> return rejected(first)
                 else -> throw ProtocolException("expected welcome, got ${first.javaClass.simpleName}")
             }
-            if (pairingToken != null) {
-                pairingToken = null // single use; reconnects go by certificate
-                listener.onPaired()
+            if (current !is Target.Paired) {
+                // Paired now; reconnects go by certificate.
+                val host = Host(current.address, current.port, hostFingerprint)
+                target = Target.Paired(host)
+                listener.onPaired(host)
             }
             val width = welcome.width.toInt()
             val height = welcome.height.toInt()

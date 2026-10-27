@@ -2,7 +2,12 @@
 <resources>
     <string name="app_name">TabExtend</string>
     <string name="paste_link">Paste pairing link</string>
-    <string name="not_paired">Not paired yet.\n\nOn the computer, run \"tabextend pair\" and scan the QR code with this tablet\'s camera, or copy the link and tap the button below.</string>
+    <string name="not_paired">Not paired yet.\n\nOn the computer, run \"tabextend pair\". Then scan its QR code, or find the computer on the network and compare codes.</string>
+    <string name="scan_qr">Scan QR code</string>
+    <string name="find_computers">Find computers</string>
+    <string name="searching">Looking for computers running \"tabextend pair\"…</string>
+    <string name="confirm_code">Check that %1$s shows this code, then type y there to allow:</string>
+    <string name="scan_hint">Point the camera at the QR code from \"tabextend pair\"</string>
     <string name="bad_link">That is not a TabExtend pairing link.</string>
     <string name="pairing">Pairing…\n\nCheck the computer shows this fingerprint:\n%1$s</string>
     <string name="streaming">%1$d×%2$d · %3$s%4$s</string>

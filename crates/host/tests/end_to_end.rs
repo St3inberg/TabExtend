@@ -16,7 +16,8 @@ use tabextend_core::protocol::{
     DisplayInfo, HEADER_LEN, Message, PAIRING_TOKEN_LEN, PROTOCOL_VERSION, PairingRequest,
     RejectReason, check_length,
 };
-use tabextend_host::capture::TestPattern;
+use tabextend_host::approve::{Approver, FixedAnswer};
+use tabextend_host::capture::{BoxFuture, TestPattern};
 use tabextend_host::identity::{HostIdentity, PairedStore, fingerprint};
 use tabextend_host::probe::GstProbe;
 use tabextend_host::server::{Server, ServerOptions};
@@ -40,6 +41,14 @@ async fn start_host() -> TestHost {
 }
 
 async fn start_host_with(capture: TestPattern) -> TestHost {
+    start_host_full(capture, Arc::new(FixedAnswer(true)), true).await
+}
+
+async fn start_host_full(
+    capture: TestPattern,
+    approver: Arc<dyn Approver>,
+    open_pairing: bool,
+) -> TestHost {
     let dir = tempfile::tempdir().unwrap();
     let identity = HostIdentity::load_or_create(dir.path()).unwrap();
     let paired = PairedStore::new(dir.path()).unwrap();
@@ -50,6 +59,7 @@ async fn start_host_with(capture: TestPattern) -> TestHost {
     let server = Server::new(
         &identity,
         paired,
+        approver,
         Arc::new(capture),
         ServerOptions {
             encoder,
@@ -57,7 +67,9 @@ async fn start_host_with(capture: TestPattern) -> TestHost {
         },
     )
     .unwrap();
-    server.open_pairing(PairingWindow::open(TOKEN, Instant::now()));
+    if open_pairing {
+        server.open_pairing(PairingWindow::open(TOKEN, Instant::now()));
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(Arc::new(server).run(listener));
@@ -86,6 +98,10 @@ impl Tablet {
             cert: cert.der().clone(),
             key: PrivatePkcs8KeyDer::from(key.serialize_der()),
         }
+    }
+
+    fn fingerprint(&self) -> Fingerprint {
+        fingerprint(&self.cert)
     }
 
     async fn connect(&self, host: &TestHost, pin: Fingerprint) -> std::io::Result<Client> {
@@ -530,4 +546,138 @@ async fn refused_touch_falls_back_to_driving_the_pointer() {
             },
         ]
     );
+}
+
+/// Records what the user would be asked, and answers yes.
+#[derive(Default)]
+struct RecordingApprover {
+    asked: Mutex<Vec<(String, String)>>,
+}
+
+impl Approver for RecordingApprover {
+    fn approve<'a>(&'a self, device_name: &'a str, code: &'a str) -> BoxFuture<'a, bool> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((device_name.to_owned(), code.to_owned()));
+        Box::pin(async { true })
+    }
+}
+
+impl Client {
+    async fn hello_confirm(&mut self, nonce: &[u8; 32]) {
+        self.send(&Message::Hello {
+            version: PROTOCOL_VERSION,
+            pairing: PairingRequest::Confirm {
+                commitment: tabextend_core::pairing::commitment(nonce),
+            },
+            device_name: "test tablet".into(),
+            display: DisplayInfo {
+                width: 640,
+                height: 400,
+                density_dpi: 160,
+                refresh_millihz: 60_000,
+            },
+        })
+        .await;
+    }
+
+    async fn challenge(&mut self) -> [u8; 32] {
+        match self.receive_skipping_pings().await {
+            Some(Message::PairChallenge { nonce }) => nonce,
+            other => panic!("expected PairChallenge, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn pairing_by_code_shows_the_same_code_on_both_sides() {
+    use tabextend_core::pairing::{confirmation_code, format_code};
+    let approver = Arc::new(RecordingApprover::default());
+    let host = start_host_full(TestPattern::default(), approver.clone(), true).await;
+    let tablet = Tablet::new();
+    let nonce = [7u8; 32];
+
+    let mut client = tablet.connect(&host, host.fingerprint).await.unwrap();
+    client.hello_confirm(&nonce).await;
+    let host_nonce = client.challenge().await;
+    client.send(&Message::PairReveal { nonce }).await;
+    expect_stream(&mut client).await;
+
+    // The code the computer asked about is the one the tablet computes.
+    let tablet_code = format_code(confirmation_code(
+        &host.fingerprint,
+        &tablet.fingerprint(),
+        &host_nonce,
+        &nonce,
+    ));
+    assert_eq!(
+        *approver.asked.lock().unwrap(),
+        [("test tablet".to_owned(), tablet_code)]
+    );
+    drop(client);
+
+    // Paired: later connections need nothing more.
+    for attempt in 0.. {
+        let mut client = tablet.connect(&host, host.fingerprint).await.unwrap();
+        client.hello(None).await;
+        match client.receive_skipping_pings().await {
+            Some(Message::Reject {
+                reason: RejectReason::Busy,
+                ..
+            }) if attempt < 20 => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Some(Message::Welcome { .. }) => break,
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn declined_pairing_is_refused_and_not_remembered() {
+    let host = start_host_full(TestPattern::default(), Arc::new(FixedAnswer(false)), true).await;
+    let tablet = Tablet::new();
+    let mut client = tablet.connect(&host, host.fingerprint).await.unwrap();
+    client.hello_confirm(&[7; 32]).await;
+    client.challenge().await;
+    client.send(&Message::PairReveal { nonce: [7; 32] }).await;
+    expect_reject(&mut client, RejectReason::PairingDenied).await;
+
+    let mut again = tablet.connect(&host, host.fingerprint).await.unwrap();
+    again.hello(None).await;
+    expect_reject(&mut again, RejectReason::NotPaired).await;
+}
+
+#[tokio::test]
+async fn reveal_that_breaks_the_commitment_is_refused_without_asking() {
+    let approver = Arc::new(RecordingApprover::default());
+    let host = start_host_full(TestPattern::default(), approver.clone(), true).await;
+    let mut client = Tablet::new()
+        .connect(&host, host.fingerprint)
+        .await
+        .unwrap();
+    client.hello_confirm(&[7; 32]).await;
+    client.challenge().await;
+    // A different nonce than the one committed to: a machine in the middle
+    // trying to steer the code.
+    client.send(&Message::PairReveal { nonce: [8; 32] }).await;
+    expect_reject(&mut client, RejectReason::PairingDenied).await;
+    assert!(
+        approver.asked.lock().unwrap().is_empty(),
+        "the user must not be asked"
+    );
+}
+
+#[tokio::test]
+async fn pairing_by_code_needs_pairing_mode() {
+    let approver = Arc::new(RecordingApprover::default());
+    let host = start_host_full(TestPattern::default(), approver.clone(), false).await;
+    let mut client = Tablet::new()
+        .connect(&host, host.fingerprint)
+        .await
+        .unwrap();
+    client.hello_confirm(&[7; 32]).await;
+    expect_reject(&mut client, RejectReason::PairingDenied).await;
+    assert!(approver.asked.lock().unwrap().is_empty());
 }

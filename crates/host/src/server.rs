@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 
 use tabextend_core::encoder::EncoderSpec;
 use tabextend_core::input::InputMapper;
-use tabextend_core::pairing::{Fingerprint, PairingWindow};
+use tabextend_core::pairing::{
+    Fingerprint, PairingWindow, commitment_matches, confirmation_code, format_code,
+};
 use tabextend_core::protocol::{
-    Codec, HEADER_LEN, MAX_CONTROL_MESSAGE, Message, PROTOCOL_VERSION, PairingRequest,
+    Codec, HEADER_LEN, MAX_CONTROL_MESSAGE, Message, NONCE_LEN, PROTOCOL_VERSION, PairingRequest,
     RejectReason, check_length,
 };
 use tabextend_core::stream::{FrameDecision, FrameGate, default_bitrate, stream_size};
@@ -26,12 +28,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 
+use crate::approve::Approver;
 use crate::capture::{Capture, CaptureBackend};
 use crate::identity::{HostIdentity, PairedStore, fingerprint};
 use crate::pipeline::{EncodePipeline, EncodedFrame, StreamConfig, accepts_gpu_buffers};
 use crate::tls;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the tablet has to reveal its nonce after the challenge.
+const REVEAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Encoded frames waiting to be sent. Small on purpose: anything queued is latency.
 const FRAME_QUEUE: usize = 3;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
@@ -47,8 +52,12 @@ pub struct ServerOptions {
 
 pub struct Server {
     tls: TlsAcceptor,
+    host: Fingerprint,
     paired: PairedStore,
     pairing: Mutex<Option<PairingWindow>>,
+    approver: Arc<dyn Approver>,
+    /// One confirmation at a time: one question on the user's screen.
+    confirming: AtomicBool,
     capture: Arc<dyn CaptureBackend>,
     options: ServerOptions,
     busy: AtomicBool,
@@ -58,13 +67,17 @@ impl Server {
     pub fn new(
         identity: &HostIdentity,
         paired: PairedStore,
+        approver: Arc<dyn Approver>,
         capture: Arc<dyn CaptureBackend>,
         options: ServerOptions,
     ) -> Result<Self, rustls::Error> {
         Ok(Self {
             tls: TlsAcceptor::from(Arc::new(tls::server_config(identity)?)),
+            host: identity.fingerprint,
             paired,
             pairing: Mutex::new(None),
+            approver,
+            confirming: AtomicBool::new(false),
             capture,
             options,
             busy: AtomicBool::new(false),
@@ -130,14 +143,15 @@ impl Server {
                 }
                 eprintln!("Paired with {device_name} ({peer}), fingerprint {client}");
             }
-            PairingRequest::Confirm { .. } => {
-                // Scan-and-confirm pairing is being built; refuse cleanly until then.
-                return reject(
-                    &mut writer,
-                    RejectReason::PairingDenied,
-                    "pairing by scanning is not available yet; scan the QR code",
-                )
-                .await;
+            PairingRequest::Confirm { commitment } => {
+                let outcome = self
+                    .confirm(&mut reader, &mut writer, commitment, client, &device_name)
+                    .await?;
+                if let Err((reason, why)) = outcome {
+                    eprintln!("{peer}: pairing with {device_name} failed: {why}");
+                    return reject(&mut writer, reason, &why).await;
+                }
+                eprintln!("Paired with {device_name} ({peer}), fingerprint {client}");
             }
             PairingRequest::None if !self.paired.load()?.contains(&client) => {
                 eprintln!("{peer}: refused unpaired device {client}");
@@ -192,6 +206,76 @@ impl Server {
         capture.stop().await;
         eprintln!("{device_name} ({peer}) disconnected");
         result
+    }
+
+    /// Pairing by code comparison. The tablet committed to a secret nonce in
+    /// its hello; the host answers with its own nonce, the tablet reveals
+    /// its nonce, and both derive the code from the two certificates and
+    /// the two nonces. The user approves here after comparing codes.
+    async fn confirm<R, W>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+        commitment: [u8; NONCE_LEN],
+        client: Fingerprint,
+        device_name: &str,
+    ) -> io::Result<Result<(), (RejectReason, String)>>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        let open = self
+            .pairing
+            .lock()
+            .expect("pairing lock")
+            .as_ref()
+            .map(|w| w.check_open(Instant::now()));
+        match open {
+            None => {
+                return Ok(Err((
+                    RejectReason::PairingDenied,
+                    "pairing is not open; run `tabextend pair` on the computer".into(),
+                )));
+            }
+            Some(Err(why)) => return Ok(Err((RejectReason::PairingDenied, why.to_string()))),
+            Some(Ok(())) => {}
+        }
+        let Some(_slot) = BusyGuard::take(&self.confirming) else {
+            return Ok(Err((
+                RejectReason::Busy,
+                "another tablet is pairing; try again in a moment".into(),
+            )));
+        };
+
+        let mut host_nonce = [0u8; NONCE_LEN];
+        getrandom::fill(&mut host_nonce).map_err(io::Error::other)?;
+        write(writer, &Message::PairChallenge { nonce: host_nonce }).await?;
+        let revealed = match tokio::time::timeout(REVEAL_TIMEOUT, read_message(reader)).await {
+            Ok(Ok(Message::PairReveal { nonce })) => Some(nonce),
+            Ok(Ok(_)) | Err(_) => None,
+            Ok(Err(e)) => return Err(e),
+        };
+        let valid = revealed.filter(|nonce| commitment_matches(&commitment, nonce));
+        let approved = match valid {
+            Some(nonce) => {
+                let code = format_code(confirmation_code(&self.host, &client, &host_nonce, &nonce));
+                self.approver.approve(device_name, &code).await
+            }
+            None => false,
+        };
+        if let Some(window) = self.pairing.lock().expect("pairing lock").as_mut() {
+            window.finish_confirmation(approved);
+        }
+        if !approved {
+            let why = if valid.is_some() {
+                "declined on the computer"
+            } else {
+                "the pairing exchange failed"
+            };
+            return Ok(Err((RejectReason::PairingDenied, why.into())));
+        }
+        self.paired.add(client, device_name)?;
+        Ok(Ok(()))
     }
 
     fn redeem(

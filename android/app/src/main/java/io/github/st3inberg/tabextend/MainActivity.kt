@@ -1,6 +1,5 @@
 package io.github.st3inberg.tabextend
 
-import android.app.Activity
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.Configuration
@@ -20,28 +19,41 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 
 /**
  * The tablet's whole UI: a full-screen surface showing the host's virtual
- * monitor, with a status line on top while not streaming.
+ * monitor, with a panel on top while not streaming: status, pairing
+ * buttons, computers found on the network, and the code during pairing.
  */
-class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener {
+class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.Listener {
     private lateinit var hosts: HostStore
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
+    private lateinit var code: TextView
     private lateinit var stats: TextView
-    private lateinit var pasteButton: Button
+    private lateinit var computers: LinearLayout
     private lateinit var panel: LinearLayout
+    private lateinit var discovery: Discovery
 
     private var session: StreamSession? = null
     private val input = InputTranslator { surfaceView.width to surfaceView.height }
-    private var pendingPairing: PairingLink? = null
+    /** A pairing in progress: from a QR code or link, or a computer picked from the list. */
+    private var pendingTarget: Target? = null
+
+    private val scan = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val link = result.data?.dataString ?: return@registerForActivityResult
+        handlePairingIntent(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(link)))
+        restartSession()
+    }
     private var surfaceReady = false
     private var streamedSize: Pair<Int, Int>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hosts = HostStore(this)
+        discovery = Discovery(this) { found -> runOnUiThread { showComputers(found) } }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildLayout()
         handlePairingIntent(intent)
@@ -78,19 +90,38 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
             textSize = 18f
             gravity = Gravity.CENTER
         }
-        pasteButton = Button(this).apply {
-            text = getString(R.string.paste_link)
-            setOnClickListener { pasteLink() }
+        code = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 64f
+            gravity = Gravity.CENTER
+            letterSpacing = 0.1f
+            visibility = View.GONE
         }
+        fun button(label: Int, action: () -> Unit) = Button(this).apply {
+            text = getString(label)
+            setOnClickListener { action() }
+        }
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            addView(button(R.string.scan_qr) { scan.launch(Intent(this@MainActivity, ScannerActivity::class.java)) })
+            addView(button(R.string.find_computers) { findComputers() })
+            addView(button(R.string.paste_link) { pasteLink() })
+        }
+        computers = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        val wrap = { LinearLayout.LayoutParams(-2, -2).apply { topMargin = 32 } }
         panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setBackgroundColor(Color.BLACK)
             setPadding(48, 48, 48, 48)
             addView(status)
-            addView(pasteButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = 32 })
+            addView(code, wrap())
+            addView(buttons, wrap())
+            addView(computers, wrap())
         }
         stats = TextView(this).apply {
             setTextColor(Color.argb(200, 255, 255, 255))
@@ -115,13 +146,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
     }
 
     /** Keys from a physical keyboard go to the laptop; everything else stays here. */
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val key = if (session != null && panel.visibility != View.VISIBLE) input.onKey(event) else null
-        if (key != null) {
-            session?.sendInput(listOf(key))
-            return true
-        }
-        return super.dispatchKeyEvent(event)
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
+        forwardKey(event) || super.onKeyDown(keyCode, event)
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
+        forwardKey(event) || super.onKeyUp(keyCode, event)
+
+    private fun forwardKey(event: KeyEvent): Boolean {
+        if (panel.visibility == View.VISIBLE) return false
+        val key = session?.let { input.onKey(event) } ?: return false
+        session?.sendInput(listOf(key))
+        return true
     }
 
     private fun goImmersive() {
@@ -138,8 +173,36 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
             showPanel(getString(R.string.bad_link))
             return
         }
-        pendingPairing = link
+        pendingTarget = Target.WithToken(link.host, link.token)
         showPanel(getString(R.string.pairing, fingerprintText(link.host.fingerprint)))
+    }
+
+    private fun findComputers() {
+        discovery.start()
+        showComputers(emptyList())
+    }
+
+    /** One button per computer open for pairing. */
+    private fun showComputers(found: List<FoundComputer>) {
+        computers.removeAllViews()
+        val pairable = found.filter { it.pairing }
+        if (pairable.isEmpty()) {
+            computers.addView(TextView(this).apply {
+                setTextColor(Color.LTGRAY)
+                text = getString(R.string.searching)
+            })
+        }
+        for (computer in pairable) {
+            computers.addView(Button(this).apply {
+                text = computer.name
+                setOnClickListener {
+                    discovery.stop()
+                    computers.removeAllViews()
+                    pendingTarget = Target.ByCode(computer.address, computer.port, computer.name)
+                    restartSession()
+                }
+            })
+        }
     }
 
     private fun pasteLink() {
@@ -164,9 +227,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
     private fun restartSession() {
         stopSession()
         if (!surfaceReady) return
-        val pairing = pendingPairing
-        val host = pairing?.host ?: hosts.load()
-        if (host == null) {
+        val target = pendingTarget ?: hosts.load()?.let { Target.Paired(it) }
+        if (target == null) {
             showPanel(getString(R.string.not_paired))
             return
         }
@@ -174,7 +236,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
         val panel = windowManager.maximumWindowMetrics.bounds
         streamedSize = panel.width() to panel.height()
         session = StreamSession(
-            host, pairing?.token, deviceName(), display, surfaceView.holder.surface, this,
+            target, deviceName(), display, surfaceView.holder.surface, this,
         ).also { it.start() }
     }
 
@@ -186,6 +248,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
 
     override fun onDestroy() {
         stopSession()
+        discovery.stop()
         super.onDestroy()
     }
 
@@ -207,6 +270,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
 
     private fun showPanel(text: String) = runOnUiThread {
         status.text = text
+        code.visibility = View.GONE
         panel.visibility = View.VISIBLE
         stats.visibility = View.GONE
     }
@@ -216,14 +280,22 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
     override fun onStatus(text: String) = showPanel(text)
 
     override fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean) = runOnUiThread {
+        discovery.stop()
         panel.visibility = View.GONE
         stats.visibility = View.VISIBLE
         stats.text = getString(R.string.streaming, width, height, decoder, if (lowLatency) " (low latency)" else "")
     }
 
-    override fun onPaired() = runOnUiThread {
-        pendingPairing?.let { hosts.save(it.host) }
-        pendingPairing = null
+    override fun onPaired(host: Host) = runOnUiThread {
+        hosts.save(host)
+        pendingTarget = null
+    }
+
+    override fun onConfirmCode(code: String, computer: String) = runOnUiThread {
+        status.text = getString(R.string.confirm_code, computer)
+        this.code.text = code
+        this.code.visibility = View.VISIBLE
+        panel.visibility = View.VISIBLE
     }
 
     override fun onStats(fps: Double, mbps: Double) = runOnUiThread {
@@ -231,7 +303,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, StreamSession.Listener 
     }
 
     override fun onGaveUp(reason: String) {
-        runOnUiThread { pendingPairing = null }
+        runOnUiThread { pendingTarget = null }
         showPanel(reason)
     }
 
