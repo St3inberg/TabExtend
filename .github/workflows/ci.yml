@@ -20,14 +20,15 @@ jobs:
           persist-credentials: false
 
       # bad: h264parse; ugly: x264enc, the encoder the end-to-end tests use
-      # on runners without a GPU; pipewire: pipewiresrc for the sound output.
+      # on runners without a GPU; pipewire: pipewiresrc for the sound output;
+      # GTK 4 and libadwaita (1.5 on Ubuntu 24.04) for the desktop app.
       - name: Install GStreamer
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgstreamer1.0-dev gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-            gstreamer1.0-pipewire
+            gstreamer1.0-pipewire libgtk-4-dev libadwaita-1-dev
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:

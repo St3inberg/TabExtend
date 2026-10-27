@@ -6,7 +6,7 @@ use tabextend_core::check::{
     Check, DiscoveryCheck, EncoderCheck, RemoteDesktopCheck, Report, ScreenCastCheck, SessionCheck,
     Status,
 };
-use tabextend_core::encoder::{EncoderSpec, default_h264_encoders, probe_all};
+use tabextend_core::encoder::{EncoderSpec, ProbeReport, default_h264_encoders, probe_all};
 
 use crate::portals;
 use crate::probe::GstProbe;
@@ -15,7 +15,9 @@ use crate::probe::GstProbe;
 const PROBE_WIDTH: u32 = 1280;
 const PROBE_HEIGHT: u32 = 800;
 
-pub fn run(extra_encoder: Option<&str>) -> Status {
+/// Run every check and probe every encoder. Takes a few seconds (test
+/// encodes); call it off the UI thread.
+pub fn collect(extra_encoder: Option<&str>) -> (Report, Vec<ProbeReport>) {
     let mut candidates = default_h264_encoders();
     if let Some(element) = extra_encoder
         && !candidates.iter().any(|spec| spec.element == element)
@@ -50,7 +52,12 @@ pub fn run(extra_encoder: Option<&str>) -> Status {
         }),
     ];
 
-    let report = Report::run(&checks);
+    (Report::run(&checks), encoder_reports)
+}
+
+/// `tabextend doctor`: check, print, and return the worst status.
+pub fn run(extra_encoder: Option<&str>) -> Status {
+    let (report, encoder_reports) = collect(extra_encoder);
     print_report(&report);
     print_encoders(&encoder_reports);
     report.worst()
@@ -82,7 +89,7 @@ fn print_report(report: &Report) {
     );
 }
 
-fn print_encoders(reports: &[tabextend_core::encoder::ProbeReport]) {
+fn print_encoders(reports: &[ProbeReport]) {
     use tabextend_core::encoder::ProbeOutcome;
     println!();
     println!("Encoders, in the order TabExtend tries them:");

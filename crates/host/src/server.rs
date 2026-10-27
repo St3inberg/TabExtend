@@ -358,6 +358,16 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
+/// The sound pipeline of one session, which starts in the background.
+enum AudioSlot {
+    Starting,
+    /// Held only to keep the pipeline running until the session ends.
+    Running {
+        _pipeline: AudioPipeline,
+    },
+    Stopped,
+}
+
 /// What one streaming session needs.
 struct Stream<'a> {
     events: &'a Events,
@@ -428,14 +438,30 @@ where
     let mut sent_total = 0u64;
 
     // Sound: optional. Stale audio is worse than a gap, so a full queue drops.
+    // Starting a PipeWire source can block until its stream is linked, so it
+    // starts on its own thread: the picture never waits for the sound.
     let (audio_tx, mut audio) = mpsc::channel::<(u64, Vec<u8>)>(AUDIO_QUEUE);
-    let _audio_pipeline = capture.audio_source(device_name).and_then(|source| {
-        AudioPipeline::start(&source, move |pts, pcm| {
-            let _ = audio_tx.try_send((pts, pcm));
-        })
-        .map_err(|e| events(ServerEvent::Note(format!("no sound for the tablet: {e}"))))
-        .ok()
-    });
+    let audio_pipeline: Arc<Mutex<AudioSlot>> = Arc::new(Mutex::new(AudioSlot::Starting));
+    if let Some(source) = capture.audio_source(device_name) {
+        let slot = audio_pipeline.clone();
+        let events = events.clone();
+        std::thread::spawn(move || {
+            let started = AudioPipeline::start(&source, move |pts, pcm| {
+                let _ = audio_tx.try_send((pts, pcm));
+            });
+            let mut slot = slot.lock().expect("audio slot");
+            match (started, &*slot) {
+                // The tablet left while the sound was starting.
+                (Ok(_pipeline), AudioSlot::Stopped) => {}
+                (Ok(pipeline), _) => {
+                    *slot = AudioSlot::Running {
+                        _pipeline: pipeline,
+                    }
+                }
+                (Err(e), _) => events(ServerEvent::Note(format!("no sound for the tablet: {e}"))),
+            }
+        });
+    }
 
     write(
         writer,
@@ -555,6 +581,7 @@ where
         }
     };
     reader_task.abort();
+    *audio_pipeline.lock().expect("audio slot") = AudioSlot::Stopped;
     // Nothing may stay pressed on the laptop after the tablet is gone.
     for call in input.release_all() {
         let _ = capture.inject(call).await;
