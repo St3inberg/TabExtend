@@ -21,7 +21,8 @@ Or build from source:
 git clone https://github.com/St3inberg/TabExtend.git
 cd TabExtend
 cargo build --release
-./target/release/tabextend doctor
+./target/release/tabextend doctor     # check this computer
+./target/release/tabextend-app        # the desktop app
 ```
 
 The [setup tutorial](docs/setup.md) covers GStreamer and video drivers on

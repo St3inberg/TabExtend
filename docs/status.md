@@ -1,6 +1,6 @@
 # Status
 
-Work in progress. Last updated 2026-10-27, on the reference hardware
+Work in progress. Last updated 2026-10-28, on the reference hardware
 (Fedora 44, GNOME 50.6, Lenovo Idea Tab TB336FU).
 
 ## Works
@@ -36,6 +36,12 @@ Moving content now captures and sends 60 fps, with about 10 ms in the
 tablet's decoder. The causes and fixes (decoder buffering, an output loop
 that held finished frames back, encoder reference frames) are written up in
 [video-pipeline.md](video-pipeline.md).
+
+### Known issues
+
+- Some dock extensions (seen with Dash2Dock Lite) can disappear after the
+  tablet's virtual monitor is added and removed many times in a row.
+  Turning the extension off and on again brings it back.
 
 ### Not started
 
