@@ -156,6 +156,35 @@ fn main() -> glib::ExitCode {
         unsafe { std::env::set_var("LIBVA_MESSAGING_LEVEL", "1") };
     }
     let app = adw::Application::builder().application_id(APP_ID).build();
+    // The tablet's speaker outlives the process unless removed, so every
+    // way of quitting ends here: the window, Ctrl+Q, and signals (logout
+    // and `kill` send SIGTERM; Ctrl+C in a terminal sends SIGINT).
+    app.connect_shutdown(|_| tabextend_host::audio::remove_speakers());
+    let (quit_tx, quit_rx) = async_channel::bounded::<()>(1);
+    runtime().spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut hangup), Ok(mut interrupt), Ok(mut terminate)) = (
+            signal(SignalKind::hangup()),
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) else {
+            return;
+        };
+        tokio::select! {
+            _ = hangup.recv() => {}
+            _ = interrupt.recv() => {}
+            _ = terminate.recv() => {}
+        }
+        let _ = quit_tx.send(()).await;
+    });
+    glib::spawn_future_local({
+        let app = app.clone();
+        async move {
+            if quit_rx.recv().await.is_ok() {
+                app.quit();
+            }
+        }
+    });
     app.connect_activate(|app| {
         if let Some(window) = app.active_window() {
             window.present();

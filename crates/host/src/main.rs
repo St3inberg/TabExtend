@@ -174,10 +174,17 @@ fn run_server(options: &Options, pairing: bool) -> Result<(), String> {
         } else {
             eprintln!("Waiting for a paired tablet. Ctrl+C to stop.");
         }
-        tokio::select! {
+        // Logout and `kill` send SIGTERM; Ctrl+C sends SIGINT.
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|e| e.to_string())?;
+        let result = tokio::select! {
             result = host.wait() => result.map_err(|e| e.to_string()),
             _ = tokio::signal::ctrl_c() => Ok(()),
-        }
+            _ = terminate.recv() => Ok(()),
+        };
+        tabextend_host::audio::remove_speakers();
+        result
     })
 }
 

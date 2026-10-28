@@ -92,6 +92,13 @@ pub fn null_sink_args(label: &str) -> Vec<String> {
     ]
 }
 
+/// Remove every TabExtend speaker. Called when the host stops: the sound
+/// server keeps a speaker until it is unloaded, even after its process
+/// exits, so quitting must not skip this.
+pub fn remove_speakers() {
+    remove_stale_speakers();
+}
+
 /// A speaker left behind by a TabExtend that crashed.
 fn remove_stale_speakers() {
     let Ok(output) = Command::new("pactl")
