@@ -883,4 +883,90 @@ mod tests {
             let _ = Message::decode(&bytes);
         }
     }
+
+    /// Seeded xorshift: failures reproduce exactly, no extra crates needed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// Whatever a peer sends, decoding returns an error or a message; it
+    /// never panics, and anything it accepts survives a round trip.
+    #[test]
+    fn fuzzed_bodies_never_panic() {
+        let mut rng = Rng(0x7ab5_e7e2_d0c0_ffee);
+        let bodies: Vec<Vec<u8>> = all_messages()
+            .iter()
+            .map(|m| m.encode()[HEADER_LEN..].to_vec())
+            .collect();
+        // Compared as bytes: a NaN coordinate (accepted here, dropped by
+        // the input mapper) never equals itself as a value.
+        let check = |body: &[u8]| {
+            if let Ok(message) = Message::decode(body) {
+                let again = message.encode();
+                let reread = Message::decode(&again[HEADER_LEN..]).unwrap_or_else(|e| {
+                    panic!("accepted {body:02x?} but not its re-encoding: {e:?}")
+                });
+                assert_eq!(reread.encode(), again, "{body:02x?} does not round-trip");
+            }
+        };
+        // TABEXTEND_FUZZ_ITERATIONS=10000000 for a longer search.
+        let iterations = std::env::var("TABEXTEND_FUZZ_ITERATIONS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(100_000);
+        for _ in 0..iterations {
+            // Noise of any length, starting with any tag.
+            let len = rng.below(96);
+            let noise: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            check(&noise);
+
+            // A real message, damaged.
+            let mut body = bodies[rng.below(bodies.len())].clone();
+            match rng.below(5) {
+                0 => {
+                    let at = rng.below(body.len());
+                    body[at] ^= 1 << rng.below(8);
+                }
+                1 => body.truncate(rng.below(body.len() + 1)),
+                2 => body.extend((0..rng.below(16)).map(|_| rng.next() as u8)),
+                3 if body.len() > 4 => {
+                    // Lengths inside the body set to extremes.
+                    let at = 1 + rng.below(body.len() - 4);
+                    let extreme = [0u32, 1, 0x7fff_ffff, u32::MAX][rng.below(4)];
+                    body[at..at + 4].copy_from_slice(&extreme.to_be_bytes());
+                }
+                _ => {
+                    for _ in 0..1 + rng.below(4) {
+                        let at = rng.below(body.len());
+                        body[at] = rng.next() as u8;
+                    }
+                }
+            }
+            check(&body);
+        }
+    }
+
+    #[test]
+    fn length_checks_never_panic() {
+        let mut rng = Rng(0x0dd_ba11);
+        for tag in 0..=u8::MAX {
+            for length in [0, 1, 4095, 4096, 4097, 1 << 20, 1 << 24, u32::MAX] {
+                let _ = check_length(length, tag);
+            }
+            for _ in 0..200 {
+                let _ = check_length(rng.next() as u32, tag);
+            }
+        }
+    }
 }
