@@ -485,6 +485,7 @@ where
             &capture.source(gpu_buffers),
             encoder,
             &config,
+            |pipeline| capture.attach(pipeline),
             move |frame| {
                 let room = frame_tx.capacity() > 0;
                 let decision = gate.lock().expect("gate").decide(frame.keyframe, room);

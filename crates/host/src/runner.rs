@@ -19,6 +19,7 @@ use crate::identity::{HostIdentity, PairedStore, default_data_dir};
 use crate::mdns::{self, Advertisement, Announcement};
 use crate::probe::GstProbe;
 use crate::server::{KEEP_MONITOR, Server, ServerOptions};
+use crate::wlroots::{Compositor, WlrootsDesktop};
 
 pub const DEFAULT_PORT: u16 = 47420;
 
@@ -86,6 +87,9 @@ impl RunningHost {
 
         let capture: Arc<dyn CaptureBackend> = if config.test_pattern {
             Arc::new(TestPattern::default())
+        } else if let Some(compositor) = Compositor::detect() {
+            // The wlroots portal cannot create monitors: drive the compositor.
+            Arc::new(WlrootsDesktop::new(compositor))
         } else {
             Arc::new(PortalVirtualMonitor::new(data_dir.join("state")))
         };

@@ -17,10 +17,13 @@ use tabextend_core::protocol::{
     RejectReason, check_length,
 };
 use tabextend_host::approve::{Approver, FixedAnswer};
-use tabextend_host::capture::{BoxFuture, Lifecycle, TestPattern};
+use tabextend_host::capture::{
+    BoxFuture, CaptureBackend, Lifecycle, PortalVirtualMonitor, TestPattern,
+};
 use tabextend_host::identity::{HostIdentity, PairedStore, fingerprint};
 use tabextend_host::probe::GstProbe;
 use tabextend_host::server::{Server, ServerOptions};
+use tabextend_host::wlroots::{Compositor, WlrootsDesktop};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsConnector;
@@ -53,19 +56,36 @@ async fn start_host_full(
     approver: Arc<dyn Approver>,
     open_pairing: bool,
 ) -> TestHost {
+    let injected = capture.injected();
+    let lifecycle = capture.lifecycle();
+    start_host_on(
+        Arc::new(capture),
+        injected,
+        lifecycle,
+        approver,
+        open_pairing,
+    )
+    .await
+}
+
+async fn start_host_on(
+    capture: Arc<dyn CaptureBackend>,
+    injected: Arc<Mutex<Vec<InputCall>>>,
+    lifecycle: Arc<Lifecycle>,
+    approver: Arc<dyn Approver>,
+    open_pairing: bool,
+) -> TestHost {
     let dir = tempfile::tempdir().unwrap();
     let identity = HostIdentity::load_or_create(dir.path()).unwrap();
     let paired = PairedStore::new(dir.path()).unwrap();
     let probe = GstProbe::new(320, 240).unwrap();
     let encoder = select_encoder(&probe, &default_h264_encoders(), None)
         .expect("tests need a working H.264 encoder (e.g. x264enc or openh264enc)");
-    let injected = capture.injected();
-    let lifecycle = capture.lifecycle();
     let server = Server::new(
         &identity,
         paired,
         approver,
-        Arc::new(capture),
+        capture,
         ServerOptions {
             encoder,
             max_width: None,
@@ -772,5 +792,176 @@ async fn sound_reaches_the_tablet_as_stereo_pcm() {
             Some(_) => continue,
             None => panic!("host closed before sending audio"),
         }
+    }
+}
+
+/// The backend TabExtend would use on this desktop.
+fn desktop_backend(state: &std::path::Path) -> Arc<dyn CaptureBackend> {
+    match Compositor::detect() {
+        Some(compositor) => Arc::new(WlrootsDesktop::new(compositor)),
+        None => Arc::new(PortalVirtualMonitor::new(state.to_path_buf())),
+    }
+}
+
+/// What Sway reports, to check the backend against the compositor itself.
+fn sway(kind: &str) -> serde_json::Value {
+    let out = std::process::Command::new("swaymsg")
+        .args(["-t", kind, "-r"])
+        .output()
+        .expect("swaymsg");
+    serde_json::from_slice(&out.stdout).expect("swaymsg json")
+}
+
+fn sway_output_sizes() -> Vec<(String, i64, i64)> {
+    sway("get_outputs")
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["active"].as_bool() == Some(true))
+        .map(|o| {
+            (
+                o["name"].as_str().unwrap().to_owned(),
+                o["rect"]["width"].as_i64().unwrap(),
+                o["rect"]["height"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Runs against the desktop it finds itself on: see tests/desktops/.
+#[tokio::test]
+#[ignore = "needs a real desktop: run with tests/desktops/run.sh"]
+async fn real_desktop_streams_takes_input_and_cleans_up() {
+    use tabextend_core::protocol::{InputEvent, MouseButton, TouchPhase};
+    let state = tempfile::tempdir().unwrap();
+    let on_sway = Compositor::detect() == Some(Compositor::Sway);
+    let outputs_before = if on_sway {
+        sway_output_sizes()
+    } else {
+        Vec::new()
+    };
+
+    let host = start_host_on(
+        desktop_backend(state.path()),
+        Arc::default(),
+        Arc::default(),
+        Arc::new(FixedAnswer(true)),
+        true,
+    )
+    .await;
+    let mut client = Tablet::new()
+        .connect(&host, host.fingerprint)
+        .await
+        .unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+
+    // Sound: play to the tablet's speaker and wait for it to arrive.
+    let speaker = format!("device={}", tabextend_host::audio::SPEAKER_NODE);
+    let mut player = std::process::Command::new("gst-launch-1.0")
+        .args([
+            "-q",
+            "audiotestsrc",
+            "num-buffers=300",
+            "!",
+            "audioconvert",
+            "!",
+            "pulsesink",
+            &speaker,
+        ])
+        .spawn()
+        .expect("gst-launch-1.0");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut sound = false;
+    while !sound && Instant::now() < deadline {
+        sound = matches!(client.receive().await, Some(Message::Audio { .. }));
+    }
+    let _ = player.kill();
+    let _ = player.wait();
+    assert!(sound, "sound played to the tablet's speaker arrived");
+
+    if on_sway {
+        let added: Vec<_> = sway_output_sizes()
+            .into_iter()
+            .filter(|o| !outputs_before.contains(o))
+            .collect();
+        assert_eq!(added.len(), 1, "one output for the tablet: {added:?}");
+        assert_eq!((added[0].1, added[0].2), (640, 400), "at the stream size");
+    }
+
+    // Input of every kind; moving the pointer also makes new frames.
+    for i in 0..10 {
+        let x = 0.1 + i as f32 * 0.08;
+        client
+            .send(&Message::Input(InputEvent::PointerMove { x, y: 0.5 }))
+            .await;
+    }
+    client
+        .send(&Message::Input(InputEvent::Button {
+            button: MouseButton::Left,
+            pressed: true,
+        }))
+        .await;
+    client
+        .send(&Message::Input(InputEvent::Button {
+            button: MouseButton::Left,
+            pressed: false,
+        }))
+        .await;
+    client
+        .send(&Message::Input(InputEvent::Key {
+            code: 30, // A
+            pressed: true,
+        }))
+        .await;
+    client
+        .send(&Message::Input(InputEvent::Key {
+            code: 30,
+            pressed: false,
+        }))
+        .await;
+    for phase in [TouchPhase::Down, TouchPhase::Move, TouchPhase::Up] {
+        client
+            .send(&Message::Input(InputEvent::Touch {
+                slot: 0,
+                phase,
+                x: 0.5,
+                y: 0.5,
+            }))
+            .await;
+    }
+
+    // Still streaming after all that input.
+    let mut frames = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while frames < 3 && Instant::now() < deadline {
+        if let Some(Message::Video { .. }) = client.receive_skipping_pings().await {
+            frames += 1;
+        }
+        client
+            .send(&Message::Input(InputEvent::PointerMove {
+                x: 0.2 + frames as f32 * 0.1,
+                y: 0.3,
+            }))
+            .await;
+    }
+    assert!(frames >= 3, "frames kept coming while input was sent");
+
+    if on_sway {
+        let inputs = sway("get_inputs").to_string().to_lowercase();
+        assert!(
+            inputs.contains("virtual"),
+            "virtual input devices registered: {inputs}"
+        );
+    }
+
+    drop(client);
+    tokio::time::sleep(KEEP_MONITOR + Duration::from_secs(2)).await;
+    if on_sway {
+        assert_eq!(
+            sway_output_sizes(),
+            outputs_before,
+            "the tablet's output is gone"
+        );
     }
 }

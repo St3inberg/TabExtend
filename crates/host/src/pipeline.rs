@@ -89,6 +89,7 @@ impl EncodePipeline {
         source: &str,
         spec: &EncoderSpec,
         config: &StreamConfig,
+        attach: impl FnOnce(&gst::Bin) -> Result<(), String>,
         on_frame: impl Fn(EncodedFrame) + Send + Sync + 'static,
         on_error: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<Self, String> {
@@ -103,6 +104,11 @@ impl EncodePipeline {
             encoder_fragment(spec)
         );
         let pipeline = gst::parse::launch(&description).map_err(|e| e.to_string())?;
+        attach(
+            pipeline
+                .downcast_ref::<gst::Bin>()
+                .ok_or("pipeline is not a bin")?,
+        )?;
         for skipped in apply_settings(
             &pipeline,
             &spec.settings(config.bitrate_bps, config.keyframe_interval),

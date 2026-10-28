@@ -1,0 +1,16 @@
+# A headless Sway desktop for testing TabExtend's wlroots backend.
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf -y install --setopt=install_weak_deps=False \
+        sway grim wlr-randr dbus-daemon \
+        pipewire wireplumber pipewire-pulseaudio pulseaudio-utils \
+        gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+        gstreamer1-plugins-ugly-free openh264 gstreamer1-plugin-openh264 pipewire-gstreamer \
+        avahi libcap \
+    && dnf clean all
+# Fedora gives sway cap_sys_nice; a rootless container cannot grant it and
+# refuses to run the binary. Sway works without it.
+RUN setcap -r /usr/bin/sway
+# No GPU or input devices in the container: software rendering, no libinput.
+ENV WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
+    XDG_RUNTIME_DIR=/run/user/0
+RUN mkdir -p /run/user/0 && chmod 700 /run/user/0

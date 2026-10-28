@@ -39,6 +39,11 @@ pub trait Capture: Send + Sync {
     /// With `gpu_buffers`, frames stay in GPU memory (DMA-BUF) where the
     /// source can do that.
     fn source(&self, gpu_buffers: bool) -> String;
+    /// Called with the built pipeline before it starts, for captures that
+    /// push frames into it themselves.
+    fn attach(&self, _pipeline: &gstreamer::Bin) -> Result<(), String> {
+        Ok(())
+    }
     /// The surface's size in logical pixels, the space input positions use.
     fn input_size(&self) -> (f64, f64);
     /// A gst-launch fragment producing the sound to play on the tablet, or
