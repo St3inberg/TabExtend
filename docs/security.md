@@ -94,9 +94,47 @@ Everything the client sends is untrusted.
 - Messages are length-prefixed with a hard maximum size; oversized messages
   close the connection.
 - Parsers live in `tabextend-core`, in safe Rust, with unit tests for
-  malformed input. Fuzzing is planned for the protocol parser before the
-  first release.
+  malformed input and a seeded fuzz test (random noise and damaged real
+  messages; 100k iterations in CI, 10M run by hand with no failure).
 - No `unsafe` in protocol or input handling.
+- A tablet's name is cleaned once, when its hello arrives: control and
+  invisible formatting characters (direction overrides, zero-width
+  characters) are removed and the length capped, so a name cannot hide or
+  reverse text. The desktop app shows names as plain text, never markup.
+
+### Connections from strangers
+
+Anyone on the network can reach the port before proving anything.
+
+- At most 8 unauthenticated connections per address and 64 in total;
+  extra ones are closed at once. A paired tablet stops counting as soon as
+  it is authenticated, so one machine flooding the port cannot lock it
+  out. A failed accept (e.g. out of file descriptors) is retried, never
+  fatal.
+- TLS handshake and hello each have a 10-second limit.
+- Pairing refusals reach the screen only while the user has a pairing
+  window open, so strangers cannot put messages on the desktop.
+
+### Pairing links on the tablet
+
+`tabextend://pair` links opened from outside the app (a web page, a
+message, another app) show a confirmation with the computer's address and
+key, and warn when they would replace the paired computer: a paired
+computer receives everything typed and tapped on the tablet. Scanning or
+pasting inside the app is the user's own action and is not asked twice.
+
+### Accepted risks
+
+- **A paired tablet is fully trusted.** Its keyboard reaches the focused
+  window anywhere on the desktop, not only the tablet's screen. A lost,
+  unlocked tablet should be removed under Paired Tablets.
+- **The computer is recognisable.** Its announcement carries a short id
+  derived from its key, and its certificate is shown to anyone who
+  connects; someone could recognise the same computer on different
+  networks. Hiding this would not survive a single connection attempt.
+- **The host key is a file** readable by the user's own account (mode
+  0600). Anything running as the user could copy it, but such a program
+  already controls the desktop.
 
 ### Supply chain
 
@@ -123,5 +161,27 @@ the firewall, with rules that expire on their own after 2 hours.
 | `cargo deny`, Dependabot, pinned actions, read-only CI token | done |
 | Test scripts: backup, rollback, firewall restriction | done |
 | Pairing by QR code, link or code; TLS 1.3 with pinning; interface binding | done |
-| Input clipping, release on disconnect | done (delivery blocked, issue #1) |
-| Fuzzing the protocol parser | planned before M5 |
+| Input clipping, release on disconnect | done |
+| Fuzzing the protocol parser | done |
+| Caps on unauthenticated connections, accept never fatal | done |
+| Pairing links from outside the app confirmed on the tablet | done |
+| Tablet names cleaned; no markup from tablets in the desktop app | done |
+
+## Assessment, October 2026
+
+An attacker's-eye review of the protocols and code, with each finding
+fixed and covered by a test that fails on the old code.
+
+| Finding | Severity | Fix |
+|---|---|---|
+| Unlimited unauthenticated connections; one failed accept stopped the host for good, so a flood could lock paired tablets out | medium-high | 1526a21 |
+| Pairing links from any web page or app paired the tablet at once, replacing the paired computer | medium | ef9f574 |
+| Code-pairing requests with pairing closed put attacker-named messages on the desktop | low | 8c06e9f |
+| Tablet names could carry direction overrides and invisible characters; toast titles were markup | low | 9164074 |
+| Protocol decoder under fuzzing (20M hostile inputs) | — | no failure; fuzz test added (cc4678e) |
+
+Reviewed without findings: TLS 1.3 with mutual pinning; QR pairing (one
+use, 2 minutes, 5 wrong tries); code pairing with a commitment (1 in a
+million per attempt); key storage (Android Keystore; 0600 files); the
+tablet app's permissions and exported components; the sound capture
+(only the TabExtend speaker, never another output).
