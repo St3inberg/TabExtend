@@ -42,4 +42,5 @@ interface Actions {
     fun setPlaySound(on: Boolean)
     fun setShowStats(on: Boolean)
     fun openSource()
+    fun openDonate()
 }

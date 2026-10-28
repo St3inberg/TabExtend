@@ -220,6 +220,9 @@ fn run(program: &str, args: &[&str]) -> Result<String, String> {
 
 /// What this compositor lacks for TabExtend (empty: nothing).
 pub fn missing_features(compositor: Compositor) -> Result<Vec<String>, String> {
+    if sandboxed() {
+        return Err("the Flatpak cannot control this desktop; use the native package".into());
+    }
     let mut missing = Vec::new();
     let (tool, args): (&str, &[&str]) = match compositor {
         Compositor::Sway => ("swaymsg", &["-t", "get_version"]),
@@ -284,10 +287,22 @@ impl WlrootsDesktop {
     }
 }
 
+/// Inside a Flatpak sandbox, where swaymsg and hyprctl cannot be reached.
+pub fn sandboxed() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
 impl CaptureBackend for WlrootsDesktop {
     fn start(&self, width: u32, height: u32) -> BoxFuture<'_, Result<Box<dyn Capture>, String>> {
         let compositor = self.compositor;
         Box::pin(async move {
+            if sandboxed() {
+                return Err(format!(
+                    "{} needs the native TabExtend package: the Flatpak cannot add a \
+                     monitor to this desktop",
+                    compositor.name()
+                ));
+            }
             tokio::task::spawn_blocking(move || WlrootsCapture::open(compositor, width, height))
                 .await
                 .map_err(|e| e.to_string())?

@@ -661,6 +661,13 @@ private fun SettingsScreen(state: UiState, actions: Actions) {
                         stringResource(R.string.source_code_detail),
                         onClick = actions::openSource,
                     )
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                    SettingRow(
+                        DrawableIcon(R.drawable.ic_coffee),
+                        stringResource(R.string.donate),
+                        stringResource(R.string.donate_detail),
+                        onClick = actions::openDonate,
+                    )
                 }
                 Spacer(Modifier.height(24.dp))
             }

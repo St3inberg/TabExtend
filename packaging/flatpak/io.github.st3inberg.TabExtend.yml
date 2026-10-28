@@ -1,0 +1,50 @@
+# Flatpak build of TabExtend for GNOME and KDE Plasma.
+#
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#       build packaging/flatpak/io.github.st3inberg.TabExtend.yml
+#
+# Sway and Hyprland need the native package: TabExtend drives those
+# compositors with swaymsg/hyprctl, which a sandbox cannot reach.
+id: io.github.st3inberg.TabExtend
+runtime: org.gnome.Platform
+runtime-version: "50"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: tabextend-app
+finish-args:
+  - --share=network # the tablet connects over the local network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri # hardware video encoding
+  - --socket=pulseaudio # pactl: adds the tablet as a speaker
+  - --filesystem=xdg-run/pipewire-0 # records what plays to that speaker
+  - --system-talk-name=org.freedesktop.Avahi # so the tablet can find the computer
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/tabextend/cargo
+modules:
+  - name: tabextend
+    buildsystem: simple
+    build-options:
+      # Lets cargo download crates. Fine for local and release builds;
+      # Flathub builds offline and needs a generated cargo-sources.json.
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release --locked -p tabextend-host -p tabextend-app
+      - install -Dm755 target/release/tabextend-app target/release/tabextend -t /app/bin
+      - install -Dm644 data/io.github.st3inberg.TabExtend.desktop -t /app/share/applications
+      - install -Dm644 data/io.github.st3inberg.TabExtend.svg -t /app/share/icons/hicolor/scalable/apps
+      - install -Dm644 data/io.github.st3inberg.TabExtend.metainfo.xml -t /app/share/metainfo
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build
+          - .flatpak-builder
+          - android
+          - .git

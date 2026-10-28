@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.st3inberg.TabExtend</id>
+  <name>TabExtend</name>
+  <summary>Use an Android tablet as a second screen</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.st3inberg">
+    <name>Stephen Stenberg</name>
+  </developer>
+  <description>
+    <p>
+      TabExtend turns an Android tablet into a wireless extended monitor for
+      your Linux desktop. Drag windows onto the tablet and use it with touch,
+      a pen, a mouse or a keyboard. The computer's sound can play on the
+      tablet too.
+    </p>
+    <ul>
+      <li>Wireless over your local network, no cable needed</li>
+      <li>Pair by scanning a QR code or comparing a six-digit code</li>
+      <li>Encrypted with TLS 1.3; only paired tablets can connect</li>
+      <li>Hardware video encoding on Intel, AMD and NVIDIA, chosen automatically</li>
+      <li>Works on GNOME and KDE Plasma</li>
+    </ul>
+    <p>Install the TabExtend app on the tablet from the project's releases.</p>
+  </description>
+  <launchable type="desktop-id">io.github.st3inberg.TabExtend.desktop</launchable>
+  <url type="homepage">https://github.com/St3inberg/TabExtend</url>
+  <url type="bugtracker">https://github.com/St3inberg/TabExtend/issues</url>
+  <url type="vcs-browser">https://github.com/St3inberg/TabExtend</url>
+  <url type="donation">https://buymeacoffee.com/st3nberg</url>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <branding>
+    <color type="primary" scheme_preference="light">#a7c7ec</color>
+    <color type="primary" scheme_preference="dark">#1e3a5f</color>
+  </branding>
+  <releases>
+    <release version="0.2.0" date="2026-10-28">
+      <description>
+        <p>Touch and keyboard input, smooth 60 fps, sound on the tablet, a desktop app and a new tablet app.</p>
+      </description>
+    </release>
+  </releases>
+</component>

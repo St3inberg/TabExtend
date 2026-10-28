@@ -494,7 +494,7 @@ pub fn system_check(window: &Window) {
 }
 
 pub fn about(window: &Window) {
-    adw::AboutDialog::builder()
+    let dialog = adw::AboutDialog::builder()
         .application_name("TabExtend")
         .application_icon(crate::APP_ID)
         .developer_name("Stephen Stenberg")
@@ -503,6 +503,7 @@ pub fn about(window: &Window) {
         .issue_url("https://github.com/St3inberg/TabExtend/issues")
         .license_type(gtk::License::Gpl30)
         .comments("Use an Android tablet as a wireless extended monitor")
-        .build()
-        .present(Some(&window.window));
+        .build();
+    dialog.add_link("Buy Me a Coffee", "https://buymeacoffee.com/st3nberg");
+    dialog.present(Some(&window.window));
 }

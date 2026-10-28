@@ -241,6 +241,10 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(getString(R.string.source_url))))
     }
 
+    override fun openDonate() {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(getString(R.string.donate_url))))
+    }
+
     // The video surface and the session.
 
     override fun surfaceCreated(holder: SurfaceHolder) {
