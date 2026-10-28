@@ -4,7 +4,7 @@ use std::env;
 
 use tabextend_core::check::{
     Check, DiscoveryCheck, EncoderCheck, RemoteDesktopCheck, Report, ScreenCastCheck, SessionCheck,
-    Status,
+    SoundCheck, Status,
 };
 use tabextend_core::encoder::{EncoderSpec, ProbeReport, default_h264_encoders, probe_all};
 
@@ -49,6 +49,9 @@ pub fn collect(extra_encoder: Option<&str>) -> (Report, Vec<ProbeReport>) {
         }),
         Box::new(DiscoveryCheck {
             avahi_running: portals::avahi_running(),
+        }),
+        Box::new(SoundCheck {
+            server: sound_server(),
         }),
     ];
 
@@ -105,4 +108,22 @@ fn print_encoders(reports: &[ProbeReport]) {
             report.spec.element, report.spec.backend
         );
     }
+}
+
+/// The sound server as `pactl info` names it.
+fn sound_server() -> Result<String, String> {
+    let output = std::process::Command::new("pactl")
+        .arg("info")
+        .output()
+        .map_err(|_| "not installed".to_owned())?;
+    if !output.status.success() {
+        return Err("no sound server answered".into());
+    }
+    let info = String::from_utf8_lossy(&output.stdout);
+    Ok(info
+        .lines()
+        .find_map(|line| line.strip_prefix("Server Name: "))
+        .unwrap_or("unknown server")
+        .trim()
+        .to_owned())
 }

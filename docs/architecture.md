@@ -273,15 +273,24 @@ flowchart LR
 
 ## 11. Sound
 
+While a tablet is connected, the host creates a virtual speaker named after
+it (a null sink: a sound card that plays nowhere, always running at 48 kHz
+stereo) and records its monitor. Because the speaker always runs, it can be
+picked at any time; it is removed when the tablet leaves, and a leftover
+from a crash is cleaned up on the next start.
+
 ```mermaid
 flowchart LR
-    App["any app on the computer"] --> Sink["PipeWire sink<br/>'TabExtend: tablet name'<br/>(appears while connected)"]
-    Sink --> Cap["pipewiresrc → 48 kHz stereo S16"] --> Q["16-chunk queue<br/>(full → drop: stale sound is worse than a gap)"]
+    App["any app on the computer"] -->|"you pick 'TabExtend: tablet'<br/>as the output"| Sink["virtual speaker<br/>pactl load-module module-null-sink<br/>low priority: never chosen by itself"]
+    Sink --> Mon["its monitor → pipewiresrc<br/>never follows another output"]
+    Mon --> Cap["48 kHz stereo S16"] --> Q["16-chunk queue<br/>(full → drop: stale sound is worse than a gap)"]
     Q -->|"Audio messages"| AT["AudioTrack, low latency,<br/>~60 ms buffer"] --> Spk["tablet speakers / headphones"]
 ```
 
 You pick the tablet in the computer's sound settings like any speaker; the
-"Play computer sound" switch on the tablet turns playback off.
+"Play computer sound" switch on the tablet turns playback off. Needs
+`pactl` (part of PipeWire's PulseAudio support on most distributions);
+`tabextend doctor` checks for it.
 
 ## 12. Finding computers on the network
 

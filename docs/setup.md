@@ -69,21 +69,25 @@ names are best-effort, and corrections are welcome.
 
 ```sh
 sudo dnf install git cargo rustfmt clippy gstreamer1-devel \
-    gstreamer1-plugins-base gstreamer1-plugins-bad-free pipewire-gstreamer
+    gstreamer1-plugins-base gstreamer1-plugins-bad-free pipewire-gstreamer \
+    pulseaudio-utils
 ```
 
 **Ubuntu / Debian**
 
 ```sh
 sudo apt install git cargo libgstreamer1.0-dev gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-bad gstreamer1.0-pipewire
+    gstreamer1.0-plugins-bad gstreamer1.0-pipewire pulseaudio-utils
 ```
 
 **Arch**
 
 ```sh
-sudo pacman -S git rust gstreamer gst-plugins-base gst-plugins-bad gst-plugin-pipewire
+sudo pacman -S git rust gstreamer gst-plugins-base gst-plugins-bad gst-plugin-pipewire libpulse
 ```
+
+`pulseaudio-utils` (`libpulse` on Arch) provides `pactl`, which TabExtend
+uses to add the tablet as a speaker. It works with PipeWire too.
 
 ## 2. Install a hardware video encoder
 
@@ -188,6 +192,7 @@ TABEXTEND_ENCODER=nvh264enc ./target/release/tabextend doctor
 | H.264 encoder: `vah264enc` failed | On Fedora, the codec-stripped driver is installed; see the Fedora note in step 2. |
 | H.264 encoder: only software works | It will run, but with high CPU use. Install your GPU's driver from step 2. |
 | mDNS discovery: Avahi not running | `sudo systemctl enable --now avahi-daemon`. |
+| Sound on the tablet: pactl unavailable | Install `pulseaudio-utils` (`libpulse` on Arch). The picture works without it. |
 
 ## Next
 

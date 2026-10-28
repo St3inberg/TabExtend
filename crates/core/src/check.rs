@@ -268,11 +268,46 @@ impl Check for DiscoveryCheck {
     }
 }
 
+/// Sound on the tablet needs `pactl` to create its virtual speaker.
+pub struct SoundCheck {
+    /// What `pactl info` reported: the sound server's name, or why it failed.
+    pub server: Result<String, String>,
+}
+
+impl Check for SoundCheck {
+    fn name(&self) -> &str {
+        "Sound on the tablet"
+    }
+
+    fn evaluate(&self) -> Finding {
+        match &self.server {
+            Ok(server) => Finding::pass(format!("pactl works ({server})")),
+            Err(error) => Finding::warn(
+                format!("pactl unavailable ({error})"),
+                "Install pactl (pulseaudio-utils on most distributions) to hear the computer \
+                 on the tablet. The picture works without it.",
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::encoder::EncoderSpec;
     use crate::portal::{device_type, source_type};
+
+    #[test]
+    fn sound_without_pactl_is_a_warning_not_a_failure() {
+        let ok = SoundCheck {
+            server: Ok("PulseAudio (on PipeWire 1.6.9)".into()),
+        };
+        assert_eq!(ok.evaluate().status, Status::Pass);
+        let missing = SoundCheck {
+            server: Err("not installed".into()),
+        };
+        assert_eq!(missing.evaluate().status, Status::Warn);
+    }
 
     fn session(session_type: &str, desktop: &str) -> Finding {
         SessionCheck {
