@@ -17,7 +17,11 @@ for _ in $(seq 1 75); do
 done
 sleep 1
 HYPRLAND_INSTANCE_SIGNATURE=$(ls "$XDG_RUNTIME_DIR/hypr/")
-WAYLAND_DISPLAY=$(cd "$XDG_RUNTIME_DIR" && ls -d wayland-* | grep -v '^wayland-0' | grep -v lock | head -1)
+# Hyprland's own socket: the one that is not labwc's wayland-0.
+for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
+    name=$(basename "$sock")
+    case "$name" in wayland-0 | *.lock) ;; *) WAYLAND_DISPLAY=$name ;; esac
+done
 export HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY
 echo "desktop: $(hyprctl version | head -1)"
 "$@"
