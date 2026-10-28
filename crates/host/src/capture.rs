@@ -54,6 +54,14 @@ pub trait Capture: Send + Sync {
 pub struct TestPattern {
     injected: Arc<Mutex<Vec<InputCall>>>,
     refuse_touch: bool,
+    lifecycle: Arc<Lifecycle>,
+}
+
+/// How many monitors a backend has created and removed.
+#[derive(Debug, Default)]
+pub struct Lifecycle {
+    pub started: std::sync::atomic::AtomicUsize,
+    pub stopped: std::sync::atomic::AtomicUsize,
 }
 
 impl TestPattern {
@@ -69,6 +77,11 @@ impl TestPattern {
     pub fn injected(&self) -> Arc<Mutex<Vec<InputCall>>> {
         self.injected.clone()
     }
+
+    /// Counts of monitors started and stopped, across sessions.
+    pub fn lifecycle(&self) -> Arc<Lifecycle> {
+        self.lifecycle.clone()
+    }
 }
 
 struct TestPatternCapture {
@@ -76,18 +89,24 @@ struct TestPatternCapture {
     height: u32,
     injected: Arc<Mutex<Vec<InputCall>>>,
     refuse_touch: bool,
+    lifecycle: Arc<Lifecycle>,
 }
 
 impl CaptureBackend for TestPattern {
     fn start(&self, width: u32, height: u32) -> BoxFuture<'_, Result<Box<dyn Capture>, String>> {
         let injected = self.injected.clone();
         let refuse_touch = self.refuse_touch;
+        let lifecycle = self.lifecycle.clone();
+        lifecycle
+            .started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
             Ok(Box::new(TestPatternCapture {
                 width,
                 height,
                 injected,
                 refuse_touch,
+                lifecycle,
             }) as Box<dyn Capture>)
         })
     }
@@ -120,6 +139,9 @@ impl Capture for TestPatternCapture {
     }
 
     fn stop(self: Box<Self>) -> BoxFuture<'static, ()> {
+        self.lifecycle
+            .stopped
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async {})
     }
 }

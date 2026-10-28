@@ -18,7 +18,7 @@ use crate::events::{Events, ServerEvent};
 use crate::identity::{HostIdentity, PairedStore, default_data_dir};
 use crate::mdns::{self, Advertisement, Announcement};
 use crate::probe::GstProbe;
-use crate::server::{Server, ServerOptions};
+use crate::server::{KEEP_MONITOR, Server, ServerOptions};
 
 pub const DEFAULT_PORT: u16 = 47420;
 
@@ -97,6 +97,7 @@ impl RunningHost {
             ServerOptions {
                 encoder: encoder.clone(),
                 max_width: config.max_width,
+                keep_monitor: KEEP_MONITOR,
             },
         )
         .map_err(|e| e.to_string())?

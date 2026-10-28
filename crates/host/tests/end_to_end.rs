@@ -17,7 +17,7 @@ use tabextend_core::protocol::{
     RejectReason, check_length,
 };
 use tabextend_host::approve::{Approver, FixedAnswer};
-use tabextend_host::capture::{BoxFuture, TestPattern};
+use tabextend_host::capture::{BoxFuture, Lifecycle, TestPattern};
 use tabextend_host::identity::{HostIdentity, PairedStore, fingerprint};
 use tabextend_host::probe::GstProbe;
 use tabextend_host::server::{Server, ServerOptions};
@@ -33,8 +33,12 @@ struct TestHost {
     address: SocketAddr,
     fingerprint: Fingerprint,
     injected: Arc<Mutex<Vec<InputCall>>>,
+    lifecycle: Arc<Lifecycle>,
     _dir: tempfile::TempDir,
 }
+
+/// Short, so tests can watch a parked monitor expire.
+const KEEP_MONITOR: Duration = Duration::from_millis(1500);
 
 async fn start_host() -> TestHost {
     start_host_with(TestPattern::default()).await
@@ -56,6 +60,7 @@ async fn start_host_full(
     let encoder = select_encoder(&probe, &default_h264_encoders(), None)
         .expect("tests need a working H.264 encoder (e.g. x264enc or openh264enc)");
     let injected = capture.injected();
+    let lifecycle = capture.lifecycle();
     let server = Server::new(
         &identity,
         paired,
@@ -64,6 +69,7 @@ async fn start_host_full(
         ServerOptions {
             encoder,
             max_width: None,
+            keep_monitor: KEEP_MONITOR,
         },
     )
     .unwrap();
@@ -77,6 +83,7 @@ async fn start_host_full(
         address,
         fingerprint: identity.fingerprint,
         injected,
+        lifecycle,
         _dir: dir,
     }
 }
@@ -295,6 +302,68 @@ async fn pairs_streams_and_reconnects_without_a_token() {
             other => panic!("expected Welcome on reconnect, got {other:?}"),
         }
     }
+}
+
+/// Connect a paired tablet, retrying while the host frees the stream slot.
+async fn reconnect(host: &TestHost, tablet: &Tablet) -> Client {
+    for _ in 0..20 {
+        let mut client = tablet.connect(host, host.fingerprint).await.unwrap();
+        client.hello(None).await;
+        match client.receive_skipping_pings().await {
+            Some(Message::Reject {
+                reason: RejectReason::Busy,
+                ..
+            }) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Some(Message::Welcome { .. }) => return client,
+            other => panic!("expected Welcome on reconnect, got {other:?}"),
+        }
+    }
+    panic!("host stayed busy");
+}
+
+fn counts(host: &TestHost) -> (usize, usize) {
+    use std::sync::atomic::Ordering::SeqCst;
+    (
+        host.lifecycle.started.load(SeqCst),
+        host.lifecycle.stopped.load(SeqCst),
+    )
+}
+
+#[tokio::test]
+async fn quick_reconnect_keeps_the_same_monitor() {
+    let host = start_host().await;
+    let tablet = Tablet::new();
+    let mut client = tablet.connect(&host, host.fingerprint).await.unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+    drop(client);
+
+    let _client = reconnect(&host, &tablet).await;
+    // One monitor, never removed: windows on it stayed put.
+    assert_eq!(counts(&host), (1, 0));
+}
+
+#[tokio::test]
+async fn monitor_is_removed_when_the_tablet_stays_away() {
+    let host = start_host().await;
+    let tablet = Tablet::new();
+    let mut client = tablet.connect(&host, host.fingerprint).await.unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+    drop(client);
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(counts(&host), (1, 0), "still kept during the grace period");
+    tokio::time::sleep(KEEP_MONITOR + Duration::from_millis(1000)).await;
+    assert_eq!(
+        counts(&host),
+        (1, 1),
+        "removed once the grace period ran out"
+    );
+
+    // Coming back later creates a fresh monitor.
+    let _client = reconnect(&host, &tablet).await;
+    assert_eq!(counts(&host), (2, 1));
 }
 
 #[tokio::test]

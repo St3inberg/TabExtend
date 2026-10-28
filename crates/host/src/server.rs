@@ -9,7 +9,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,22 @@ const MAX_FPS: u32 = 60;
 pub struct ServerOptions {
     pub encoder: EncoderSpec,
     pub max_width: Option<u32>,
+    /// How long the tablet's monitor outlives a dropped connection. A
+    /// tablet that comes back in time gets the same monitor, so windows
+    /// stay where they were and GNOME sees no monitor unplugged and
+    /// plugged in again. Zero removes it at once.
+    pub keep_monitor: Duration,
+}
+
+/// How long the monitor waits for its tablet by default.
+pub const KEEP_MONITOR: Duration = Duration::from_secs(10);
+
+/// A monitor whose tablet just disconnected, waiting for it to return.
+struct Parked {
+    id: u64,
+    capture: Box<dyn Capture>,
+    tablet: Fingerprint,
+    size: (u32, u32),
 }
 
 pub struct Server {
@@ -66,6 +82,8 @@ pub struct Server {
     options: ServerOptions,
     busy: AtomicBool,
     events: Events,
+    parked: Arc<Mutex<Option<Parked>>>,
+    parked_seq: AtomicU64,
 }
 
 impl Server {
@@ -87,6 +105,8 @@ impl Server {
             options,
             busy: AtomicBool::new(false),
             events: print_events(),
+            parked: Arc::new(Mutex::new(None)),
+            parked_seq: AtomicU64::new(0),
         })
     }
 
@@ -98,6 +118,51 @@ impl Server {
 
     fn emit(&self, event: ServerEvent) {
         (self.events)(event);
+    }
+
+    /// The monitor kept for this tablet, if it is waiting at this size.
+    /// Any other parked monitor is removed: only one tablet streams at once.
+    async fn unpark(&self, tablet: Fingerprint, size: (u32, u32)) -> Option<Box<dyn Capture>> {
+        let parked = self.parked.lock().expect("parked").take()?;
+        if parked.tablet == tablet && parked.size == size {
+            return Some(parked.capture);
+        }
+        parked.capture.stop().await;
+        None
+    }
+
+    /// Keep a monitor for [`ServerOptions::keep_monitor`], then remove it
+    /// unless its tablet came back.
+    fn park(&self, capture: Box<dyn Capture>, tablet: Fingerprint, size: (u32, u32)) {
+        let wait = self.options.keep_monitor;
+        if wait.is_zero() {
+            tokio::spawn(capture.stop());
+            return;
+        }
+        let id = self.parked_seq.fetch_add(1, Ordering::Relaxed);
+        let replaced = self.parked.lock().expect("parked").replace(Parked {
+            id,
+            capture,
+            tablet,
+            size,
+        });
+        if let Some(old) = replaced {
+            tokio::spawn(old.capture.stop());
+        }
+        let parked = self.parked.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let expired = {
+                let mut slot = parked.lock().expect("parked");
+                match &*slot {
+                    Some(p) if p.id == id => slot.take(),
+                    _ => None,
+                }
+            };
+            if let Some(p) = expired {
+                p.capture.stop().await;
+            }
+        });
     }
 
     /// Accept one pairing with this window's token.
@@ -219,9 +284,12 @@ impl Server {
         };
         let fps = (display.refresh_millihz / 1000).clamp(1, MAX_FPS);
 
-        let capture = match self.capture.start(width, height).await {
-            Ok(capture) => capture,
-            Err(why) => return reject(&mut writer, RejectReason::CaptureFailed, &why).await,
+        let capture = match self.unpark(client, (width, height)).await {
+            Some(capture) => capture,
+            None => match self.capture.start(width, height).await {
+                Ok(capture) => capture,
+                Err(why) => return reject(&mut writer, RejectReason::CaptureFailed, &why).await,
+            },
         };
         self.emit(ServerEvent::Streaming {
             name: device_name.clone(),
@@ -245,7 +313,17 @@ impl Server {
             &mut writer,
         )
         .await;
-        capture.stop().await;
+        // Only a lost connection is worth waiting out; a capture that
+        // failed is not reused.
+        let reusable = match &result {
+            Ok(()) => true,
+            Err(e) => is_disconnect(e),
+        };
+        if reusable {
+            self.park(capture, client, (width, height));
+        } else {
+            capture.stop().await;
+        }
         self.emit(ServerEvent::Disconnected {
             name: device_name.clone(),
         });
