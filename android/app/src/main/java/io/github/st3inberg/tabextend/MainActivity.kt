@@ -22,6 +22,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.ComposeView
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 /**
  * The whole app: a full-screen surface for the computer's screen, with the
@@ -52,6 +53,12 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The icon zooms and fades into the first screen.
+        installSplashScreen().setOnExitAnimationListener { splash ->
+            splash.iconView.animate().scaleX(1.4f).scaleY(1.4f).setDuration(SPLASH_EXIT_MS).start()
+            splash.view.animate().alpha(0f).setDuration(SPLASH_EXIT_MS)
+                .withEndAction { splash.remove() }.start()
+        }
         super.onCreate(savedInstanceState)
         hosts = HostStore(this)
         settings = AppSettings(this)
@@ -118,7 +125,12 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
                 it.show(WindowInsets.Type.systemBars())
             }
         }
-        if (streaming) discovery.stop()
+        if (screen == Screen.Pairing && state.code == null && pendingTarget == null) {
+            findComputers()
+        } else if (screen != Screen.Pairing) {
+            discovery.stop()
+            state.searching = false
+        }
     }
 
     /** Send input to the host while streaming; true means the event was used. */
@@ -264,10 +276,12 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
             ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "TabExtend")
             ?.apply { setReferenceCounted(false) }
         wifiLock?.acquire()
+        if (state.searching) discovery.start()
     }
 
     override fun onPause() {
         wifiLock?.release()
+        discovery.stop()
         super.onPause()
     }
 
@@ -338,5 +352,6 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
 
     private companion object {
         const val MAX_FPS = 60.0
+        const val SPLASH_EXIT_MS = 300L
     }
 }

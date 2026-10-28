@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon version: one colour, the system tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M29,39h32a3,3 0,0 1,3 3v24h-38v-24a3,3 0,0 1,3 -3zM30,43v19h30v-19z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M22,68h48v2a3,3 0,0 1,-3 3h-42a3,3 0,0 1,-3 -3z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M72,35h11a3,3 0,0 1,3 3v34a3,3 0,0 1,-3 3h-11a3,3 0,0 1,-3 -3v-34a3,3 0,0 1,3 -3z" />
+</vector>

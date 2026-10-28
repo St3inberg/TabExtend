@@ -1,7 +1,7 @@
 //! The main window: what is happening, live connection numbers, and the
 //! tablets paired with this computer.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -90,6 +90,9 @@ pub struct Inner {
     rows: ConnectionRows,
     tablets: adw::PreferencesGroup,
     tablet_rows: RefCell<Vec<gtk::Widget>>,
+    has_tablets: Cell<bool>,
+    /// The pairing dialog opens by itself once, on a first run.
+    offered_pairing: Cell<bool>,
     pub host: HostSlot,
     channels: Channels,
     /// The open pairing dialog, closed when a tablet pairs.
@@ -225,6 +228,8 @@ impl Window {
             host: Arc::new(Mutex::new(None)),
             channels,
             pair_dialog: RefCell::new(None),
+            has_tablets: Cell::new(false),
+            offered_pairing: Cell::new(false),
         }));
         this.connect_signals();
         this.listen();
@@ -281,6 +286,10 @@ impl Window {
                     this.title.set_subtitle(&summary);
                     this.pair_button.set_sensitive(true);
                     this.show_waiting();
+                    // First run: nothing to stream to yet, so go straight to pairing.
+                    if !this.has_tablets.get() && !this.offered_pairing.replace(true) {
+                        dialogs::pair(&this);
+                    }
                 }
                 Err(error) => {
                     this.title.set_subtitle("");
@@ -296,7 +305,7 @@ impl Window {
     fn show_waiting(&self) {
         self.connection.set_visible(false);
         self.status.set_icon_name(Some("video-display-symbolic"));
-        if self.tablet_rows.borrow().is_empty() {
+        if !self.has_tablets.get() {
             self.status.set_title("No Tablets Yet");
             self.status.set_description(Some(
                 "Install TabExtend on your Android tablet, then pair it with this computer",
@@ -383,6 +392,7 @@ impl Window {
             .and_then(|store| store.load())
             .unwrap_or_default();
         let mut rows = self.tablet_rows.borrow_mut();
+        self.has_tablets.set(!devices.is_empty());
         if devices.is_empty() {
             let row = adw::ActionRow::builder()
                 .title("No tablets paired")
