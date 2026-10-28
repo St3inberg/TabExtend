@@ -38,7 +38,7 @@
     <string name="waiting_for_allow">Waiting for you to allow it on the computer…</string>
     <string name="status_connecting">Connecting</string>
     <string name="status_offline">Not connected</string>
-    <string name="status_waiting">Waiting</string>
+    <string name="status_waiting">Waiting for computer</string>
     <string name="tips">Tips</string>
     <string name="tip_drag">The tablet is the screen to the right: drag windows past the right edge</string>
     <string name="tip_sound">To hear the computer here, choose TabExtend as its sound output</string>

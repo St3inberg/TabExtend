@@ -526,7 +526,7 @@ private fun HomeScreen(state: UiState, actions: Actions) {
                     else -> StatusChip(stringResource(R.string.status_waiting), colors.secondaryContainer, colors.onSecondaryContainer)
                 }
                 Headline(state.computerName ?: "", state.error ?: state.status)
-                if (!state.busy) {
+                if (!state.busy && !state.waiting) {
                     FilledTonalButton(onClick = actions::retry) {
                         Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))

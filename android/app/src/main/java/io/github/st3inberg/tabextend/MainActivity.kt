@@ -264,6 +264,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
     }
 
     private fun stopSession() {
+        state.waiting = false
         session?.stop()
         session = null
         input.reset()
@@ -310,6 +311,8 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
     // StreamSession.Listener: called on the session thread.
 
     override fun onStatus(text: String) = runOnUiThread {
+        // Quiet retries while waiting for the computer: keep the calm waiting state.
+        if (state.waiting) return@runOnUiThread
         state.status = text
         state.busy = true
         if (state.screen == Screen.Streaming) {
@@ -317,7 +320,15 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         }
     }
 
+    override fun onWaiting(text: String) = runOnUiThread {
+        state.waiting = true
+        state.busy = false
+        state.error = null
+        state.status = text
+    }
+
     override fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean) = runOnUiThread {
+        state.waiting = false
         state.code = null
         state.error = null
         stats.text = getString(R.string.streaming, width, height, decoder, if (lowLatency) " (low latency)" else "")

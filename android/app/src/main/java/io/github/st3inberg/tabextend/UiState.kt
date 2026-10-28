@@ -14,6 +14,8 @@ class UiState {
     var status by mutableStateOf("")
     /** A connection attempt is running. */
     var busy by mutableStateOf(false)
+    /** The computer is not answering; retrying quietly in the background. */
+    var waiting by mutableStateOf(false)
     /** Why the last attempt stopped, if it gave up. */
     var error by mutableStateOf<String?>(null)
     /** The code to compare while pairing by code, and with which computer. */

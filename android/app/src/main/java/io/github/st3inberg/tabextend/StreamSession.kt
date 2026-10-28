@@ -50,6 +50,8 @@ class StreamSession(
 ) {
     interface Listener {
         fun onStatus(text: String)
+        /** The computer is not reachable (TabExtend not running, or asleep); still retrying. */
+        fun onWaiting(text: String)
         fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean)
         fun onPaired(host: Host)
         fun onConfirmCode(code: String, computer: String)
@@ -90,7 +92,7 @@ class StreamSession(
                 if (target is Target.ByCode) {
                     Outcome.GiveUp("Pairing failed: $why")
                 } else {
-                    listener.onStatus(describe(e))
+                    if (isUnreachable(e)) listener.onWaiting(describe(e)) else listener.onStatus(describe(e))
                     Outcome.Retry
                 }
             }
@@ -252,13 +254,18 @@ class StreamSession(
 }
 
 /** A short explanation for the home screen; the details are in the log. */
+/** Nothing answered: the computer is off, asleep, elsewhere, or not running TabExtend. */
+internal fun isUnreachable(e: Exception): Boolean {
+    val text = e.message.orEmpty()
+    return e is java.net.ConnectException || e is java.net.SocketTimeoutException ||
+        listOf("ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH").any { it in text }
+}
+
 internal fun describe(e: Exception): String {
     android.util.Log.i("TabExtend", "connection failed", e)
     val text = e.message.orEmpty()
     return when {
-        e is java.net.ConnectException || "ECONNREFUSED" in text || "ETIMEDOUT" in text ||
-            "EHOSTUNREACH" in text || "ENETUNREACH" in text ->
-            "Waiting for the computer. Start TabExtend on it, on the same network."
+        isUnreachable(e) -> "Open TabExtend on the computer. This tablet connects by itself once it is running on the same network."
         e is javax.net.ssl.SSLException -> "Secure connection failed. If TabExtend was reinstalled on the computer, pair again from Settings."
         e is IOException -> "Connection lost. Trying again…"
         else -> "Error: ${text.ifEmpty { e.javaClass.simpleName }}"
