@@ -50,4 +50,9 @@
     <string name="donate">Buy me a coffee</string>
     <string name="donate_detail">Support the development of TabExtend</string>
     <string name="donate_url" translatable="false">https://buymeacoffee.com/st3nberg</string>
+    <string name="link_title">Pair with this computer?</string>
+    <string name="link_body">A link asks this tablet to pair with a computer. Only continue if you just opened the pairing window in TabExtend on your own computer: a paired computer receives everything you type and tap here.</string>
+    <string name="link_key">Key %1$s…</string>
+    <string name="link_replaces">This replaces %1$s.</string>
+    <string name="link_pair">Pair</string>
 </resources>

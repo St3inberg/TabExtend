@@ -49,7 +49,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
 
     private val scan = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val link = result.data?.dataString ?: return@registerForActivityResult
-        handlePairingIntent(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
+        handlePairingIntent(Intent(Intent.ACTION_VIEW, Uri.parse(link)), fromOutside = false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,12 +75,12 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildLayout()
         showScreen(if (state.computerName != null) Screen.Home else Screen.Pairing)
-        handlePairingIntent(intent)
+        handlePairingIntent(intent, fromOutside = true)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handlePairingIntent(intent)
+        handlePairingIntent(intent, fromOutside = true)
     }
 
     /** On rotation, reconnect so the host recreates the monitor at the new size. */
@@ -159,7 +159,14 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         return true
     }
 
-    private fun handlePairingIntent(intent: Intent?) {
+    /**
+     * A pairing link. One from outside the app (a web page, a message,
+     * another app) is shown for confirmation first: otherwise any link
+     * could pair this tablet with a stranger's computer, which would then
+     * receive everything typed and tapped here. Scanning or pasting in the
+     * app is already the user's own choice.
+     */
+    private fun handlePairingIntent(intent: Intent?, fromOutside: Boolean) {
         val uri = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString ?: return
         val link = PairingLink.parse(uri)
         if (link == null) {
@@ -167,7 +174,27 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
             showScreen(Screen.Pairing)
             return
         }
+        if (fromOutside) {
+            screenBeforeLink = state.screen.takeIf { it != Screen.Streaming }
+                ?: if (state.computerName != null) Screen.Home else Screen.Pairing
+            state.linkToConfirm = link
+            showScreen(screenBeforeLink)
+            return
+        }
         startPairing(Target.WithToken(link.host, link.token), null)
+    }
+
+    private var screenBeforeLink = Screen.Pairing
+
+    override fun confirmLink() {
+        val link = state.linkToConfirm ?: return
+        state.linkToConfirm = null
+        startPairing(Target.WithToken(link.host, link.token), null)
+    }
+
+    override fun cancelLink() {
+        state.linkToConfirm = null
+        showScreen(screenBeforeLink)
     }
 
     private fun startPairing(target: Target, name: String?) {
@@ -194,7 +221,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
     override fun pasteLink() {
         val clip = getSystemService(ClipboardManager::class.java)?.primaryClip
         val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
-        handlePairingIntent(Intent(Intent.ACTION_VIEW, Uri.parse(text ?: "")))
+        handlePairingIntent(Intent(Intent.ACTION_VIEW, Uri.parse(text ?: "")), fromOutside = false)
     }
 
     override fun pick(computer: FoundComputer) =

@@ -127,6 +127,7 @@ fun TabExtendTheme(content: @Composable () -> Unit) {
 
 @Composable
 fun App(state: UiState, actions: Actions) {
+    state.linkToConfirm?.let { LinkDialog(it, state.computerName, actions) }
     AnimatedContent(
         targetState = state.screen,
         transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(150)) },
@@ -690,4 +691,29 @@ private fun SettingsScreen(state: UiState, actions: Actions) {
             },
         )
     }
+}
+
+/** A pairing link from outside the app: say where it leads before using it. */
+@Composable
+private fun LinkDialog(link: PairingLink, current: String?, actions: Actions) {
+    val key = link.host.fingerprint.take(8).joinToString(":") { "%02x".format(it) }
+    AlertDialog(
+        onDismissRequest = actions::cancelLink,
+        icon = { Icon(Icons.Filled.Warning, null) },
+        title = { Text(stringResource(R.string.link_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(stringResource(R.string.link_body))
+                Text(
+                    "${link.host.address}:${link.host.port}\n" + stringResource(R.string.link_key, key),
+                    fontFamily = FontFamily.Monospace,
+                )
+                if (current != null) {
+                    Text(stringResource(R.string.link_replaces, current), color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = actions::confirmLink) { Text(stringResource(R.string.link_pair)) } },
+        dismissButton = { TextButton(onClick = actions::cancelLink) { Text(stringResource(R.string.cancel)) } },
+    )
 }

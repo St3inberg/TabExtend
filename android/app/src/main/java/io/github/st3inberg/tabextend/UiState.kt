@@ -20,6 +20,8 @@ class UiState {
     var error by mutableStateOf<String?>(null)
     /** The code to compare while pairing by code, and with which computer. */
     var code by mutableStateOf<String?>(null)
+    /** A pairing link from outside the app, waiting for the user to confirm it. */
+    var linkToConfirm by mutableStateOf<PairingLink?>(null)
     var codeComputer by mutableStateOf("")
     var searching by mutableStateOf(false)
     var computers by mutableStateOf<List<FoundComputer>>(emptyList())
@@ -42,5 +44,7 @@ interface Actions {
     fun setPlaySound(on: Boolean)
     fun setShowStats(on: Boolean)
     fun openSource()
+    fun confirmLink()
+    fun cancelLink()
     fun openDonate()
 }
