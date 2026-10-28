@@ -73,7 +73,7 @@ jobs:
           persist-credentials: false
 
       - name: ShellCheck
-        run: shellcheck scripts/*.sh
+        run: shellcheck scripts/*.sh data/install.sh
 
   supply-chain:
     runs-on: ubuntu-latest

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -34,6 +35,8 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
     private lateinit var screens: ComposeView
     private lateinit var discovery: Discovery
     private val state = UiState()
+    /** Wi-Fi power saving delays packets by up to ~100 ms; Android honours this lock only while we are on screen. */
+    private var wifiLock: WifiManager.WifiLock? = null
 
     private var session: StreamSession? = null
     private val input = InputTranslator { surfaceView.width to surfaceView.height }
@@ -253,6 +256,19 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         session = null
         input.reset()
         state.busy = false
+    }
+
+    override fun onResume() {
+        super.onResume()
+        wifiLock = wifiLock ?: getSystemService(WifiManager::class.java)
+            ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "TabExtend")
+            ?.apply { setReferenceCounted(false) }
+        wifiLock?.acquire()
+    }
+
+    override fun onPause() {
+        wifiLock?.release()
+        super.onPause()
     }
 
     override fun onDestroy() {

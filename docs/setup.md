@@ -36,26 +36,27 @@ will need to pair again.
 
 1. Install GStreamer and your GPU's video driver: steps 1 and 2 below
    (the runtime packages are enough; skip `-devel`/`-dev` and the Rust tools).
-2. Download `tabextend-<version>-linux-x86_64.tar.gz` and check it:
+2. Download the desktop app, `tabextend-app-<version>-linux-x86_64.tar.gz`
+   (needs libadwaita 1.5 or newer: Fedora 40+, Ubuntu 24.04+, Debian 13+),
+   then check and install it for your user:
 
    ```sh
-   sha256sum -c tabextend-<version>-linux-x86_64.tar.gz.sha256
-   tar xzf tabextend-<version>-linux-x86_64.tar.gz
-   cd tabextend-<version>-linux-x86_64
-   ./tabextend doctor
+   sha256sum -c tabextend-app-<version>-linux-x86_64.tar.gz.sha256
+   tar xzf tabextend-app-<version>-linux-x86_64.tar.gz
+   cd tabextend-app-<version>-linux-x86_64
+   ./install.sh            # ./install.sh --uninstall removes it
    ```
 
-3. Pair and connect:
+   On an older distribution, take `tabextend-<version>-linux-x86_64.tar.gz`
+   instead: the same host as a command-line program (`./tabextend doctor`,
+   `./tabextend pair`, `./tabextend serve`).
 
-   ```sh
-   ./tabextend pair
-   ```
-
-   In the app, tap **Scan QR code** and point the camera at the QR code.
+3. Open **TabExtend** from your app list and choose **Pair a Tablet**.
+   On the tablet, tap **Scan QR code** and point the camera at the QR code.
    Or tap **Find computers**, pick your computer, check both screens show
-   the same 6-digit code, and type `y` on the computer. The first time, GNOME asks to share the
-   screen: turn on **Allow remote interaction**, then share. Afterwards,
-   `./tabextend serve` is enough.
+   the same 6-digit code, and choose **Allow** on the computer. The first
+   time, GNOME asks to share the screen: turn on **Allow remote
+   interaction**, then share. After that, opening TabExtend on both is enough.
 
 ## Build from source
 

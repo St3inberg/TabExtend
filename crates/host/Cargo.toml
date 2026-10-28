@@ -12,7 +12,7 @@ name = "tabextend"
 path = "src/main.rs"
 
 [dependencies]
-tabextend-core = { path = "../core", version = "0.1.0" }
+tabextend-core = { path = "../core", version = "0.2.0" }
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "remote_desktop"] }
 reis = { version = "0.7", features = ["tokio"] }
 futures-util = { version = "0.3", default-features = false }

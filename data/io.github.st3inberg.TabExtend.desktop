@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TabExtend
+Comment=Use an Android tablet as a second screen
+Exec=tabextend-app
+Icon=io.github.st3inberg.TabExtend
+Terminal=false
+Categories=Utility;GTK;
+Keywords=tablet;monitor;display;screen;extend;android;
+StartupNotify=true
