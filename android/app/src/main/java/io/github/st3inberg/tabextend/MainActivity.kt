@@ -62,7 +62,12 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         super.onCreate(savedInstanceState)
         hosts = HostStore(this)
         settings = AppSettings(this)
-        discovery = Discovery(this) { found -> runOnUiThread { state.computers = found } }
+        discovery = Discovery(this) { found ->
+            runOnUiThread {
+                state.computers = found
+                followMovedHost(found)
+            }
+        }
         state.playSound = settings.playSound
         state.showStats = settings.showStats
         state.version = packageManager.getPackageInfo(packageName, 0).versionName ?: ""
@@ -325,6 +330,19 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         state.busy = false
         state.error = null
         state.status = text
+        // The computer may have a new address: look for it by its announced id.
+        if (pendingTarget == null) discovery.start()
+    }
+
+    /** The paired computer shows up at a new address: save it and connect there. */
+    private fun followMovedHost(found: List<FoundComputer>) {
+        if (!state.waiting || pendingTarget != null) return
+        val host = hosts.load() ?: return
+        val moved = relocated(host, found) ?: return
+        val name = hosts.name()?.takeIf { it != host.address } ?: moved.address
+        hosts.save(moved, name)
+        state.computerName = name
+        restartSession()
     }
 
     override fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean) = runOnUiThread {

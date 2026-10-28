@@ -40,6 +40,21 @@ data class PairingLink(val host: Host, val token: ByteArray) {
     }
 }
 
+/** The short id the host announces: the first 8 bytes of its fingerprint (`host_id` in mdns.rs). */
+fun hostId(fingerprint: ByteArray) = hex(fingerprint.copyOfRange(0, 8))
+
+/**
+ * The paired host at a new address, if the network shows it moved (its
+ * router gave it another IP). Matched by announced id; the TLS pin still
+ * checks the full certificate, so a fake announcement cannot impersonate it.
+ */
+fun relocated(host: Host, found: List<FoundComputer>): Host? {
+    val id = hostId(host.fingerprint)
+    val match = found.firstOrNull { it.id == id } ?: return null
+    if (match.address == host.address && match.port == host.port) return null
+    return host.copy(address = match.address, port = match.port)
+}
+
 fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
 
 fun fingerprintText(bytes: ByteArray) = bytes.joinToString(":") { "%02x".format(it) }
