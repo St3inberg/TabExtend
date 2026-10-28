@@ -4,12 +4,13 @@ use std::env;
 
 use tabextend_core::check::{
     Check, DiscoveryCheck, EncoderCheck, RemoteDesktopCheck, Report, ScreenCastCheck, SessionCheck,
-    SoundCheck, Status,
+    SoundCheck, Status, WlrootsCheck,
 };
 use tabextend_core::encoder::{EncoderSpec, ProbeReport, default_h264_encoders, probe_all};
 
 use crate::portals;
 use crate::probe::GstProbe;
+use crate::wlroots::{self, Compositor};
 
 /// Test-encode size: large enough to hit hardware limits a tiny frame would not.
 const PROBE_WIDTH: u32 = 1280;
@@ -33,27 +34,41 @@ pub fn collect(extra_encoder: Option<&str>) -> (Report, Vec<ProbeReport>) {
         }
     };
 
-    let checks: Vec<Box<dyn Check>> = vec![
-        Box::new(SessionCheck {
-            session_type: env::var("XDG_SESSION_TYPE").ok(),
-            desktop: env::var("XDG_CURRENT_DESKTOP").ok(),
-        }),
-        Box::new(ScreenCastCheck {
-            caps: portals::screencast_caps(),
-        }),
-        Box::new(RemoteDesktopCheck {
-            caps: portals::remote_desktop_caps(),
-        }),
-        Box::new(EncoderCheck {
-            reports: encoder_reports.clone(),
-        }),
-        Box::new(DiscoveryCheck {
-            avahi_running: portals::avahi_running(),
-        }),
-        Box::new(SoundCheck {
-            server: sound_server(),
-        }),
-    ];
+    let wlroots = Compositor::detect();
+    let mut checks: Vec<Box<dyn Check>> = vec![Box::new(SessionCheck {
+        // Sway started from a console has XDG_SESSION_TYPE=tty: being able
+        // to reach a Wayland compositor is what counts.
+        session_type: env::var_os("WAYLAND_DISPLAY")
+            .is_some()
+            .then(|| "wayland".to_owned())
+            .or_else(|| env::var("XDG_SESSION_TYPE").ok()),
+        desktop: env::var("XDG_CURRENT_DESKTOP").ok(),
+        wlroots: wlroots.map(|c| c.name().to_owned()),
+    })];
+    match wlroots {
+        // Sway and Hyprland: driven directly, portals not used.
+        Some(compositor) => checks.push(Box::new(WlrootsCheck {
+            compositor: compositor.name().to_owned(),
+            missing: wlroots::missing_features(compositor),
+        })),
+        None => {
+            checks.push(Box::new(ScreenCastCheck {
+                caps: portals::screencast_caps(),
+            }));
+            checks.push(Box::new(RemoteDesktopCheck {
+                caps: portals::remote_desktop_caps(),
+            }));
+        }
+    }
+    checks.push(Box::new(EncoderCheck {
+        reports: encoder_reports.clone(),
+    }));
+    checks.push(Box::new(DiscoveryCheck {
+        avahi_running: portals::avahi_running(),
+    }));
+    checks.push(Box::new(SoundCheck {
+        server: sound_server(),
+    }));
 
     (Report::run(&checks), encoder_reports)
 }

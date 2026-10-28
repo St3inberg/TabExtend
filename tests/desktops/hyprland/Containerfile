@@ -1,0 +1,20 @@
+# A headless Hyprland desktop (on Arch Linux, which packages it) for testing
+# TabExtend's wlroots backend. Needs the GPU: run with --device /dev/dri.
+FROM docker.io/library/archlinux:latest
+RUN pacman -Syu --noconfirm --needed \
+        hyprland labwc dbus \
+        pipewire wireplumber pipewire-pulse libpulse \
+        gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly \
+        gst-plugin-pipewire mesa \
+    && pacman -Scc --noconfirm
+# In case the parent compositor asks for cap_sys_nice (refused in rootless containers).
+RUN setcap -r /usr/bin/labwc 2>/dev/null || true
+# Hyprland refuses to run as root.
+RUN useradd -m -G video,render tester \
+    && mkdir -p /run/user/1000 && chown tester /run/user/1000 && chmod 700 /run/user/1000 \
+    && mkdir -p /home/tester/.config/hypr \
+    && echo 'misc { disable_hyprland_logo = true }' > /home/tester/.config/hypr/hyprland.conf \
+    && chown -R tester /home/tester/.config
+USER tester
+# Hyprland has no headless mode yet: it runs nested in a headless labwc.
+ENV XDG_RUNTIME_DIR=/run/user/1000 WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1

@@ -46,6 +46,31 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  desktops:
+    # TabExtend against a real headless Sway in a container (Podman is on
+    # the runner): pairing, the output, frames, sound, input, cleanup.
+    # Hyprland and KDE need a GPU to render; run tests/desktops/run.sh on a
+    # machine with one.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Sway
+        run: tests/desktops/run.sh sway
+
   android:
     runs-on: ubuntu-latest
     defaults:
@@ -73,7 +98,7 @@ jobs:
           persist-credentials: false
 
       - name: ShellCheck
-        run: shellcheck scripts/*.sh data/install.sh
+        run: shellcheck scripts/*.sh data/install.sh tests/desktops/*.sh tests/desktops/*/session.sh
 
   supply-chain:
     runs-on: ubuntu-latest

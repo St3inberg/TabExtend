@@ -183,12 +183,19 @@ impl PortalVirtualMonitor {
         }
     }
 
-    async fn open(&self, width: u32, height: u32) -> ashpd::Result<PortalCapture> {
-        let remote = RemoteDesktop::new().await?;
-        let cast = Screencast::new().await?;
+    /// Open the session. Errors name the step that failed: desktops differ
+    /// in which steps they support, and "the portal said no" alone does not
+    /// tell a user (or a bug report) much.
+    async fn open(&self, width: u32, height: u32) -> Result<PortalCapture, String> {
+        let at = |step: &'static str| move |e: ashpd::Error| format!("{step}: {e}");
+        let remote = RemoteDesktop::new()
+            .await
+            .map_err(at("remote desktop portal"))?;
+        let cast = Screencast::new().await.map_err(at("screen cast portal"))?;
         let session = remote
             .create_session(CreateSessionOptions::default())
-            .await?;
+            .await
+            .map_err(at("create session"))?;
         let token = fs::read_to_string(&self.token_path).ok();
         // For remote desktop sessions the portal takes persistence on the
         // device selection, not on the source selection.
@@ -202,8 +209,9 @@ impl PortalVirtualMonitor {
                     .set_persist_mode(PersistMode::ExplicitlyRevoked)
                     .set_restore_token(token.as_deref().map(str::trim)),
             )
-            .await?
-            .response()?;
+            .await
+            .and_then(|r| r.response())
+            .map_err(at("select input devices"))?;
         cast.select_sources(
             &session,
             SelectSourcesOptions::default()
@@ -211,16 +219,21 @@ impl PortalVirtualMonitor {
                 .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Virtual))
                 .set_multiple(false),
         )
-        .await?
-        .response()?;
+        .await
+        .and_then(|r| r.response())
+        .map_err(at("select a virtual monitor"))?;
         let selected = remote
             .start(&session, None, StartOptions::default())
-            .await?
-            .response()?;
+            .await
+            .and_then(|r| r.response())
+            .map_err(at("start"))?;
         if let Some(new_token) = selected.restore_token() {
             self.save_token(new_token);
         }
-        let stream = selected.streams().first().ok_or(ashpd::Error::NoResponse)?;
+        let stream = selected
+            .streams()
+            .first()
+            .ok_or("start: the desktop shared no screen")?;
         let node = stream.pipe_wire_node_id();
         // The portal may report the stream's logical size; until the virtual
         // monitor exists it often does not, and at scale 1 the logical size
@@ -232,7 +245,8 @@ impl PortalVirtualMonitor {
         let mapping_id = stream.mapping_id().map(str::to_owned);
         let fd = cast
             .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
-            .await?;
+            .await
+            .map_err(at("open the screen stream"))?;
         // Input through libei where the portal offers it (version 2+): the
         // portal's own pointer and touch methods reject every position on
         // a virtual monitor. Fall back to them otherwise.
@@ -340,6 +354,21 @@ impl Capture for PortalCapture {
         // on screen changes, so a static desktop still produces frames.
         // Without GPU buffers, Mutter reads every frame back into system
         // memory, which costs frame rate at large sizes.
+        let screen = (self.logical.0.round() as u32, self.logical.1.round() as u32);
+        if screen != (self.width, self.height) {
+            // The desktop chose another size (KDE: always 1920×1080): take
+            // what it gives and fit it into the stream with black bars. The
+            // input mapper knows where the bars are.
+            return format!(
+                "pipewiresrc fd={} path={} always-copy=true keepalive-time=500 \
+                 ! videoconvert ! videoscale add-borders=true \
+                 ! video/x-raw,width={},height={},pixel-aspect-ratio=1/1",
+                self.fd.as_raw_fd(),
+                self.node,
+                self.width,
+                self.height
+            );
+        }
         let (memory, copy) = if gpu_buffers {
             ("(memory:DMABuf)", "")
         } else {

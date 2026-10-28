@@ -177,9 +177,7 @@ impl EncodePipeline {
             gst::BusSyncReply::Drop
         });
 
-        pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|_| "pipeline failed to start".to_owned())?;
+        play(&pipeline, "video pipeline")?;
         Ok(Self {
             pipeline,
             sink,
@@ -201,6 +199,28 @@ impl EncodePipeline {
         );
         self.sink.send_event(event);
     }
+}
+
+/// Start a pipeline. On failure, say why (the reason is on the bus, the
+/// state change error says nothing) and shut it down cleanly: a pipeline
+/// dropped outside the NULL state leaks and makes GStreamer complain.
+pub(crate) fn play(pipeline: &gst::Element, what: &str) -> Result<(), String> {
+    if pipeline.set_state(gst::State::Playing).is_ok() {
+        return Ok(());
+    }
+    let reason = pipeline
+        .bus()
+        .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
+        .and_then(|message| match message.view() {
+            gst::MessageView::Error(e) => Some(match e.debug() {
+                Some(debug) => format!("{} ({debug})", e.error()),
+                None => e.error().to_string(),
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| "no reason given".to_owned());
+    let _ = pipeline.set_state(gst::State::Null);
+    Err(format!("{what} failed to start: {reason}"))
 }
 
 impl Drop for EncodePipeline {

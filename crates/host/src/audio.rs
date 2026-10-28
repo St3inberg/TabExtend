@@ -169,19 +169,7 @@ impl AudioPipeline {
             .unwrap_or(gst::FlowReturn::Error);
             Some(flow.to_value())
         });
-        if pipeline.set_state(gst::State::Playing).is_err() {
-            // The reason is on the bus; the state change error says nothing.
-            let reason = pipeline
-                .bus()
-                .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
-                .and_then(|message| match message.view() {
-                    gst::MessageView::Error(e) => Some(e.error().to_string()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "no reason given".to_owned());
-            let _ = pipeline.set_state(gst::State::Null);
-            return Err(format!("audio pipeline failed to start: {reason}"));
-        }
+        crate::pipeline::play(&pipeline, "audio pipeline")?;
         Ok(Self {
             pipeline,
             _speaker: speaker,

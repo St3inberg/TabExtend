@@ -86,6 +86,8 @@ pub struct SessionCheck {
     pub session_type: Option<String>,
     /// `XDG_CURRENT_DESKTOP`, colon-separated
     pub desktop: Option<String>,
+    /// A wlroots compositor TabExtend drives directly (Sway, Hyprland).
+    pub wlroots: Option<String>,
 }
 
 impl Check for SessionCheck {
@@ -102,10 +104,18 @@ impl Check for SessionCheck {
                 "Log in to a Wayland session. TabExtend does not support X11.",
             );
         }
-        if !desktop.split(':').any(|d| d.eq_ignore_ascii_case("GNOME")) {
+        if let Some(compositor) = &self.wlroots {
+            return Finding::pass(format!("Wayland on {compositor}"));
+        }
+        let supported = ["GNOME", "KDE"];
+        if !desktop
+            .split(':')
+            .any(|d| supported.iter().any(|s| d.eq_ignore_ascii_case(s)))
+        {
             return Finding::warn(
                 format!("Wayland on {desktop}"),
-                "TabExtend is developed on GNOME. Other desktops may lack the virtual-monitor portal.",
+                "Tested on GNOME, KDE Plasma, Sway and Hyprland. This desktop needs the \
+                 virtual-monitor and remote-desktop portals.",
             );
         }
         Finding::pass(format!("Wayland on {desktop}"))
@@ -268,6 +278,37 @@ impl Check for DiscoveryCheck {
     }
 }
 
+/// On Sway and Hyprland TabExtend drives the compositor itself: its command
+/// tool makes the output, Wayland protocols capture it and send input.
+pub struct WlrootsCheck {
+    pub compositor: String,
+    /// Protocols or tools the compositor lacks, or why it could not be asked.
+    pub missing: Result<Vec<String>, String>,
+}
+
+impl Check for WlrootsCheck {
+    fn name(&self) -> &str {
+        "Screen and input"
+    }
+
+    fn evaluate(&self) -> Finding {
+        match &self.missing {
+            Ok(missing) if missing.is_empty() => Finding::pass(format!(
+                "{}: headless output, screencopy, virtual pointer and keyboard",
+                self.compositor
+            )),
+            Ok(missing) => Finding::fail(
+                format!("{} lacks {}", self.compositor, missing.join(", ")),
+                "Update the compositor; TabExtend needs these to add and capture a monitor.",
+            ),
+            Err(error) => Finding::fail(
+                format!("could not ask {} ({error})", self.compositor),
+                "Run TabExtend from inside the desktop session.",
+            ),
+        }
+    }
+}
+
 /// Sound on the tablet needs `pactl` to create its virtual speaker.
 pub struct SoundCheck {
     /// What `pactl info` reported: the sound server's name, or why it failed.
@@ -298,6 +339,38 @@ mod tests {
     use crate::portal::{device_type, source_type};
 
     #[test]
+    fn wlroots_desktops_count_as_supported() {
+        let sway = SessionCheck {
+            session_type: Some("wayland".into()),
+            desktop: Some("sway".into()),
+            wlroots: Some("Sway".into()),
+        };
+        assert_eq!(sway.evaluate().status, Status::Pass);
+        let kde = SessionCheck {
+            session_type: Some("wayland".into()),
+            desktop: Some("KDE".into()),
+            wlroots: None,
+        };
+        assert_eq!(kde.evaluate().status, Status::Pass);
+        let other = SessionCheck {
+            session_type: Some("wayland".into()),
+            desktop: Some("river".into()),
+            wlroots: None,
+        };
+        assert_eq!(other.evaluate().status, Status::Warn);
+        let missing = WlrootsCheck {
+            compositor: "Sway".into(),
+            missing: Ok(vec!["screencopy".into()]),
+        };
+        assert_eq!(missing.evaluate().status, Status::Fail);
+        let ok = WlrootsCheck {
+            compositor: "Sway".into(),
+            missing: Ok(vec![]),
+        };
+        assert_eq!(ok.evaluate().status, Status::Pass);
+    }
+
+    #[test]
     fn sound_without_pactl_is_a_warning_not_a_failure() {
         let ok = SoundCheck {
             server: Ok("PulseAudio (on PipeWire 1.6.9)".into()),
@@ -313,6 +386,7 @@ mod tests {
         SessionCheck {
             session_type: Some(session_type.into()),
             desktop: Some(desktop.into()),
+            wlroots: None,
         }
         .evaluate()
     }
@@ -329,8 +403,9 @@ mod tests {
     }
 
     #[test]
-    fn other_wayland_desktops_warn() {
-        assert_eq!(session("wayland", "KDE").status, Status::Warn);
+    fn untested_wayland_desktops_warn() {
+        assert_eq!(session("wayland", "KDE").status, Status::Pass);
+        assert_eq!(session("wayland", "COSMIC").status, Status::Warn);
     }
 
     #[test]
@@ -338,6 +413,7 @@ mod tests {
         let finding = SessionCheck {
             session_type: None,
             desktop: None,
+            wlroots: None,
         }
         .evaluate();
         assert_eq!(finding.status, Status::Fail);

@@ -57,9 +57,48 @@ impl InputCall {
     }
 }
 
+/// Where the desktop's picture sits inside the stream, as fractions of the
+/// stream. Usually all of it; when a desktop makes its screen a different
+/// shape than the tablet (KDE always uses 1920×1080), the picture is fitted
+/// with black bars and taps on the bars are clipped to the edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContentArea {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ContentArea {
+    pub const FULL: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+
+    /// The screen scaled to fit the stream, centred, aspect ratio kept:
+    /// what `videoscale add-borders=true` draws.
+    pub fn letterbox(stream: (f64, f64), screen: (f64, f64)) -> Self {
+        if stream.0 <= 0.0 || stream.1 <= 0.0 || screen.0 <= 0.0 || screen.1 <= 0.0 {
+            return Self::FULL;
+        }
+        let scale = (stream.0 / screen.0).min(stream.1 / screen.1);
+        let width = screen.0 * scale / stream.0;
+        let height = screen.1 * scale / stream.1;
+        Self {
+            x: (1.0 - width) / 2.0,
+            y: (1.0 - height) / 2.0,
+            width,
+            height,
+        }
+    }
+}
+
 pub struct InputMapper {
     width: f64,
     height: f64,
+    area: ContentArea,
     touches: BTreeSet<u8>,
     /// When the desktop refuses touch input, the first finger drives the
     /// pointer instead: down presses the left button, up releases it.
@@ -76,6 +115,7 @@ impl InputMapper {
         Self {
             width,
             height,
+            area: ContentArea::FULL,
             touches: BTreeSet::new(),
             emulating_touch: false,
             primary: None,
@@ -84,19 +124,34 @@ impl InputMapper {
         }
     }
 
-    /// A fraction of the stream to a pixel inside it, or None for NaN and
-    /// infinities. Clipped to the last pixel so the position stays on the
-    /// virtual monitor.
+    /// Positions arrive as fractions of the stream; `area` says where the
+    /// desktop's picture is inside it.
+    pub fn with_content_area(mut self, area: ContentArea) -> Self {
+        self.area = area;
+        self
+    }
+
+    /// A fraction of the stream to a pixel on the desktop's screen, or None
+    /// for NaN and infinities. Clipped to the last pixel so the position
+    /// stays on the virtual monitor.
     fn position(&self, x: f32, y: f32) -> Option<(f64, f64)> {
         if !x.is_finite() || !y.is_finite() {
             return None;
         }
-        let clip = |v: f32, size: f64| {
-            (f64::from(v).clamp(0.0, 1.0) * size)
-                .min(size - 1.0)
-                .max(0.0)
+        let clip = |v: f32, start: f64, extent: f64, size: f64| {
+            ((f64::from(v) - start) / extent).clamp(0.0, 1.0) * size
         };
-        Some((clip(x, self.width), clip(y, self.height)))
+        let clip_last = |v: f64, size: f64| v.min(size - 1.0).max(0.0);
+        Some((
+            clip_last(
+                clip(x, self.area.x, self.area.width, self.width),
+                self.width,
+            ),
+            clip_last(
+                clip(y, self.area.y, self.area.height, self.height),
+                self.height,
+            ),
+        ))
     }
 
     pub fn map(&mut self, event: InputEvent) -> Vec<InputCall> {
@@ -310,6 +365,46 @@ mod tests {
             m.map(touch(0, TouchPhase::Up, 0.0, 0.0)),
             [InputCall::TouchUp { slot: 0 }]
         );
+    }
+
+    #[test]
+    fn letterbox_fits_a_wide_screen_into_a_taller_stream() {
+        // KDE's 1920×1080 screen on a 16:10 tablet stream: bars above and
+        // below, none at the sides.
+        let area = ContentArea::letterbox((1808.0, 1130.0), (1920.0, 1080.0));
+        assert!((area.x).abs() < 1e-9 && (area.width - 1.0).abs() < 1e-9);
+        let bar = (1130.0 - 1808.0 * 1080.0 / 1920.0) / 2.0 / 1130.0;
+        assert!((area.y - bar).abs() < 1e-9, "{area:?}");
+        assert!((area.y * 2.0 + area.height - 1.0).abs() < 1e-9);
+        // Same shape: the whole stream.
+        assert_eq!(
+            ContentArea::letterbox((1808.0, 1130.0), (1808.0, 1130.0)),
+            ContentArea::FULL
+        );
+        assert_eq!(
+            ContentArea::letterbox((0.0, 0.0), (1.0, 1.0)),
+            ContentArea::FULL
+        );
+    }
+
+    #[test]
+    fn taps_map_through_the_bars_onto_the_screen() {
+        let area = ContentArea::letterbox((1808.0, 1130.0), (1920.0, 1080.0));
+        let mut m = InputMapper::new(1920.0, 1080.0).with_content_area(area);
+        // The middle of the tablet is the middle of the screen.
+        assert_eq!(
+            m.map(InputEvent::PointerMove { x: 0.5, y: 0.5 }),
+            [InputCall::PointerMotion { x: 960.0, y: 540.0 }]
+        );
+        // The top of the picture (just below the bar) is the screen's top;
+        // a tap on the bar itself is clipped to that edge.
+        for y in [area.y as f32, 0.0] {
+            let calls = m.map(InputEvent::PointerMove { x: 0.0, y });
+            let [InputCall::PointerMotion { y, .. }] = calls[..] else {
+                panic!("{calls:?}")
+            };
+            assert!(y.abs() < 0.01, "{y}");
+        }
     }
 
     #[test]

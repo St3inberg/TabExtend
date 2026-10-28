@@ -1,0 +1,14 @@
+# A headless KDE Plasma session (KWin + KDE's portal) for testing TabExtend's
+# portal backend the way it runs on Plasma.
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf -y install --setopt=install_weak_deps=False \
+        kwin xdg-desktop-portal xdg-desktop-portal-kde dbus-daemon dbus-tools \
+        pipewire wireplumber pipewire-pulseaudio pulseaudio-utils pipewire-gstreamer \
+        gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+        gstreamer1-plugins-ugly-free openh264 gstreamer1-plugin-openh264 \
+        mesa-dri-drivers libcap \
+    && dnf clean all
+# Rootless containers refuse binaries that ask for extra capabilities.
+RUN for f in /usr/bin/kwin_wayland /usr/bin/kwin_wayland_wrapper; do [ -f "$f" ] && setcap -r "$f" 2>/dev/null; done; true
+ENV XDG_RUNTIME_DIR=/run/user/0 XDG_CURRENT_DESKTOP=KDE QT_QPA_PLATFORM=wayland
+RUN mkdir -p /run/user/0 && chmod 700 /run/user/0

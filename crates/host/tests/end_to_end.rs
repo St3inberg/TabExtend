@@ -20,6 +20,7 @@ use tabextend_host::approve::{Approver, FixedAnswer};
 use tabextend_host::capture::{
     BoxFuture, CaptureBackend, Lifecycle, PortalVirtualMonitor, TestPattern,
 };
+use tabextend_host::events::{Events, ServerEvent};
 use tabextend_host::identity::{HostIdentity, PairedStore, fingerprint};
 use tabextend_host::probe::GstProbe;
 use tabextend_host::server::{Server, ServerOptions};
@@ -68,12 +69,36 @@ async fn start_host_full(
     .await
 }
 
+/// A host on a real desktop, reporting its events to `events`.
+async fn start_host_events(capture: Arc<dyn CaptureBackend>, events: Events) -> TestHost {
+    start_host_inner(
+        capture,
+        Arc::default(),
+        Arc::default(),
+        Arc::new(FixedAnswer(true)),
+        true,
+        Some(events),
+    )
+    .await
+}
+
 async fn start_host_on(
     capture: Arc<dyn CaptureBackend>,
     injected: Arc<Mutex<Vec<InputCall>>>,
     lifecycle: Arc<Lifecycle>,
     approver: Arc<dyn Approver>,
     open_pairing: bool,
+) -> TestHost {
+    start_host_inner(capture, injected, lifecycle, approver, open_pairing, None).await
+}
+
+async fn start_host_inner(
+    capture: Arc<dyn CaptureBackend>,
+    injected: Arc<Mutex<Vec<InputCall>>>,
+    lifecycle: Arc<Lifecycle>,
+    approver: Arc<dyn Approver>,
+    open_pairing: bool,
+    events: Option<Events>,
 ) -> TestHost {
     let dir = tempfile::tempdir().unwrap();
     let identity = HostIdentity::load_or_create(dir.path()).unwrap();
@@ -93,6 +118,10 @@ async fn start_host_on(
         },
     )
     .unwrap();
+    let server = match events {
+        Some(events) => server.with_events(events),
+        None => server,
+    };
     if open_pairing {
         server.open_pairing(PairingWindow::open(TOKEN, Instant::now()));
     }
@@ -812,20 +841,45 @@ fn sway(kind: &str) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).expect("swaymsg json")
 }
 
-fn sway_output_sizes() -> Vec<(String, i64, i64)> {
-    sway("get_outputs")
-        .as_array()
+fn hyprland(kind: &str) -> serde_json::Value {
+    let out = std::process::Command::new("hyprctl")
+        .args(["-j", kind])
+        .output()
+        .expect("hyprctl");
+    serde_json::from_slice(&out.stdout).expect("hyprctl json")
+}
+
+/// The compositor's active outputs as (name, width, height).
+fn output_sizes(compositor: Option<Compositor>) -> Vec<(String, i64, i64)> {
+    let (list, w, h) = match compositor {
+        Some(Compositor::Sway) => (sway("get_outputs"), "/rect/width", "/rect/height"),
+        Some(Compositor::Hyprland) => (hyprland("monitors"), "/width", "/height"),
+        None => return Vec::new(),
+    };
+    list.as_array()
         .unwrap()
         .iter()
-        .filter(|o| o["active"].as_bool() == Some(true))
+        .filter(|o| o["active"].as_bool() != Some(false))
+        // Hyprland adds this placeholder whenever no monitor is left, which
+        // only happens in a test session with no screen of its own.
+        .filter(|o| o["name"].as_str() != Some("FALLBACK"))
         .map(|o| {
             (
                 o["name"].as_str().unwrap().to_owned(),
-                o["rect"]["width"].as_i64().unwrap(),
-                o["rect"]["height"].as_i64().unwrap(),
+                o.pointer(w).unwrap().as_i64().unwrap(),
+                o.pointer(h).unwrap().as_i64().unwrap(),
             )
         })
         .collect()
+}
+
+/// The compositor's input devices, as text to search.
+fn input_devices(compositor: Option<Compositor>) -> String {
+    match compositor {
+        Some(Compositor::Sway) => sway("get_inputs").to_string().to_lowercase(),
+        Some(Compositor::Hyprland) => hyprland("devices").to_string().to_lowercase(),
+        None => String::new(),
+    }
 }
 
 /// Runs against the desktop it finds itself on: see tests/desktops/.
@@ -834,20 +888,19 @@ fn sway_output_sizes() -> Vec<(String, i64, i64)> {
 async fn real_desktop_streams_takes_input_and_cleans_up() {
     use tabextend_core::protocol::{InputEvent, MouseButton, TouchPhase};
     let state = tempfile::tempdir().unwrap();
-    let on_sway = Compositor::detect() == Some(Compositor::Sway);
-    let outputs_before = if on_sway {
-        sway_output_sizes()
-    } else {
-        Vec::new()
-    };
+    let compositor = Compositor::detect();
+    let outputs_before = output_sizes(compositor);
 
-    let host = start_host_on(
-        desktop_backend(state.path()),
-        Arc::default(),
-        Arc::default(),
-        Arc::new(FixedAnswer(true)),
-        true,
-    )
+    let notes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let host = start_host_events(desktop_backend(state.path()), {
+        let notes = notes.clone();
+        Arc::new(move |event| {
+            eprintln!("{event}");
+            if let ServerEvent::Note(note) = event {
+                notes.lock().unwrap().push(note);
+            }
+        })
+    })
     .await;
     let mut client = Tablet::new()
         .connect(&host, host.fingerprint)
@@ -880,8 +933,8 @@ async fn real_desktop_streams_takes_input_and_cleans_up() {
     let _ = player.wait();
     assert!(sound, "sound played to the tablet's speaker arrived");
 
-    if on_sway {
-        let added: Vec<_> = sway_output_sizes()
+    if compositor.is_some() {
+        let added: Vec<_> = output_sizes(compositor)
             .into_iter()
             .filter(|o| !outputs_before.contains(o))
             .collect();
@@ -947,19 +1000,25 @@ async fn real_desktop_streams_takes_input_and_cleans_up() {
     }
     assert!(frames >= 3, "frames kept coming while input was sent");
 
-    if on_sway {
-        let inputs = sway("get_inputs").to_string().to_lowercase();
+    if compositor.is_some() {
+        let inputs = input_devices(compositor);
         assert!(
             inputs.contains("virtual"),
             "virtual input devices registered: {inputs}"
         );
     }
 
+    // Problems the host only reports as notes would otherwise pass unseen.
+    let notes = notes.lock().unwrap().clone();
+    for bad in ["input not delivered", "no sound"] {
+        assert!(!notes.iter().any(|n| n.contains(bad)), "{bad}: {notes:?}");
+    }
+
     drop(client);
     tokio::time::sleep(KEEP_MONITOR + Duration::from_secs(2)).await;
-    if on_sway {
+    if compositor.is_some() {
         assert_eq!(
-            sway_output_sizes(),
+            output_sizes(compositor),
             outputs_before,
             "the tablet's output is gone"
         );

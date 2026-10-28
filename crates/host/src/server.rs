@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tabextend_core::encoder::EncoderSpec;
-use tabextend_core::input::InputMapper;
+use tabextend_core::input::{ContentArea, InputMapper};
 use tabextend_core::pairing::{
     Fingerprint, PairingWindow, commitment_matches, confirmation_code, format_code,
 };
@@ -509,7 +509,13 @@ where
         .map_err(io::Error::other)
     };
     let (input_width, input_height) = capture.input_size();
-    let mut input = InputMapper::new(input_width, input_height);
+    // The desktop may have made its screen another shape than the stream
+    // (KDE always uses 1920×1080); the picture then has bars around it.
+    let mut input =
+        InputMapper::new(input_width, input_height).with_content_area(ContentArea::letterbox(
+            (f64::from(width), f64::from(height)),
+            (input_width, input_height),
+        ));
     let mut input_failed = false;
     let mut gpu_buffers = accepts_gpu_buffers(encoder);
     let mut pipeline = Some(start(gpu_buffers)?);

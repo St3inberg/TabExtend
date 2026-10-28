@@ -115,14 +115,22 @@ impl Compositor {
                 // A leftover from a crash would make the create fail.
                 let _ = run("hyprctl", &["output", "remove", &name]);
                 run("hyprctl", &["output", "create", "headless", &name])?;
-                run(
-                    "hyprctl",
-                    &[
-                        "keyword",
-                        "monitor",
-                        &format!("{name},{width}x{height}@60,auto-right,1"),
-                    ],
-                )?;
+                // Hyprland 0.57 moved to a Lua config, where `keyword` is
+                // refused; older versions only have `keyword`.
+                let lua = format!(
+                    "hl.monitor({{ output = \"{name}\", mode = \"{width}x{height}@60\", \
+                     position = \"auto-right\", scale = 1 }})"
+                );
+                if run("hyprctl", &["eval", &lua]).is_err() {
+                    run(
+                        "hyprctl",
+                        &[
+                            "keyword",
+                            "monitor",
+                            &format!("{name},{width}x{height}@60,auto-right,1"),
+                        ],
+                    )?;
+                }
                 Ok(name)
             }
         }
@@ -192,8 +200,14 @@ fn run(program: &str, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("{program}: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    // swaymsg reports command failures as JSON with exit code 2.
-    if !output.status.success() || stdout.contains("\"success\": false") {
+    // swaymsg reports command failures as JSON with exit code 2; hyprctl
+    // prints an error with exit code 0.
+    let refused = stdout.contains("\"success\": false")
+        || (program == "hyprctl"
+            && !stdout.trim().is_empty()
+            && stdout.trim() != "ok"
+            && !args.first().is_some_and(|a| a.starts_with('-')));
+    if !output.status.success() || refused {
         return Err(format!(
             "{program} {}: {}{}",
             args.join(" "),
@@ -202,6 +216,61 @@ fn run(program: &str, args: &[&str]) -> Result<String, String> {
         ));
     }
     Ok(stdout)
+}
+
+/// What this compositor lacks for TabExtend (empty: nothing).
+pub fn missing_features(compositor: Compositor) -> Result<Vec<String>, String> {
+    let mut missing = Vec::new();
+    let (tool, args): (&str, &[&str]) = match compositor {
+        Compositor::Sway => ("swaymsg", &["-t", "get_version"]),
+        Compositor::Hyprland => ("hyprctl", &["version"]),
+    };
+    if run(tool, args).is_err() {
+        missing.push(format!("a working `{tool}`"));
+    }
+    let conn = Connection::connect_to_env().map_err(|e| e.to_string())?;
+    let (globals, _queue) = registry_queue_init::<ProbeState>(&conn).map_err(|e| e.to_string())?;
+    let offered = globals.contents().clone_list();
+    let needs = [
+        (
+            ZwlrScreencopyManagerV1::interface().name,
+            3,
+            "screencopy v3",
+        ),
+        (
+            ZwlrVirtualPointerManagerV1::interface().name,
+            2,
+            "virtual pointer v2",
+        ),
+        (
+            ZwpVirtualKeyboardManagerV1::interface().name,
+            1,
+            "virtual keyboard",
+        ),
+    ];
+    for (interface, version, what) in needs {
+        if !offered
+            .iter()
+            .any(|g| g.interface == interface && g.version >= version)
+        {
+            missing.push(what.to_owned());
+        }
+    }
+    Ok(missing)
+}
+
+struct ProbeState;
+
+impl Dispatch<WlRegistry, GlobalListContents> for ProbeState {
+    fn event(
+        _: &mut Self,
+        _: &WlRegistry,
+        _: <WlRegistry as Proxy>::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 /// The backend: one headless output per connected tablet.
