@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use tabextend_core::encoder::EncoderSpec;
 use tabextend_core::input::{ContentArea, InputMapper};
 use tabextend_core::pairing::{
-    Fingerprint, PairingWindow, commitment_matches, confirmation_code, format_code,
+    Fingerprint, PairingWindow, clean_device_name, commitment_matches, confirmation_code,
+    format_code,
 };
 use tabextend_core::protocol::{
     Codec, HEADER_LEN, MAX_CONTROL_MESSAGE, Message, NONCE_LEN, PROTOCOL_VERSION, PairingRequest,
@@ -286,6 +287,9 @@ impl Server {
         else {
             return Err(io::Error::other("first message was not hello"));
         };
+        // Chosen by whoever connected, not yet trusted: clean it once, here,
+        // for every place it is shown or stored.
+        let device_name = clean_device_name(&device_name);
 
         if version != PROTOCOL_VERSION {
             return reject(

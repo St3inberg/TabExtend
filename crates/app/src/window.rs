@@ -374,8 +374,11 @@ impl Window {
         self.rows.dropped.set_subtitle(&stats.dropped.to_string());
     }
 
+    /// A plain-text notice. Toast titles are Pango markup, and messages
+    /// can carry a name a tablet chose, so the text is escaped.
     pub fn toast(&self, message: &str) {
-        self.toasts.add_toast(adw::Toast::new(message));
+        self.toasts
+            .add_toast(adw::Toast::new(&glib::markup_escape_text(message)));
     }
 
     pub fn add_toast(&self, toast: adw::Toast) {

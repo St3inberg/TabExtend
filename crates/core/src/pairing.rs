@@ -232,6 +232,43 @@ pub fn confirmation_code(
     u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000
 }
 
+/// A tablet's self-chosen name, made safe to show and store. The name comes
+/// from whoever connects, before they are trusted, so it must not be able
+/// to break files or the screen: control characters and invisible
+/// formatting characters (direction overrides that reverse text, zero-width
+/// spaces that make two names look alike) are removed, whitespace is
+/// collapsed and the length capped.
+pub fn clean_device_name(name: &str) -> String {
+    let invisible = |c: char| {
+        c.is_control()
+            || matches!(c,
+                '\u{00AD}' | '\u{061C}' | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+    };
+    // Line breaks and tabs become spaces rather than vanishing, so words
+    // stay apart.
+    let visible: String = name
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|&c| !invisible(c))
+        .collect();
+    let name: String = visible
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_NAME)
+        .collect();
+    if name.is_empty() {
+        "tablet".into()
+    } else {
+        name
+    }
+}
+
 /// `123 456`: easier to compare at a glance.
 pub fn format_code(code: u32) -> String {
     format!("{:03} {:03}", code / 1000, code % 1000)
@@ -298,18 +335,9 @@ impl PairedDevices {
     /// cleaned so they cannot break the file format.
     pub fn add(&mut self, fingerprint: Fingerprint, name: &str, paired_at: u64) {
         self.remove(&fingerprint);
-        let name: String = name
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(MAX_NAME)
-            .collect();
         self.0.push(PairedDevice {
             fingerprint,
-            name: if name.trim().is_empty() {
-                "tablet".into()
-            } else {
-                name
-            },
+            name: clean_device_name(name),
             paired_at,
         });
     }
@@ -346,6 +374,28 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_names_cannot_hide_or_reverse_text() {
+        // A right-to-left override makes "Tablet\u{202E}gnp.exe" read as
+        // "Tabletexe.png"; zero-width spaces make two names look alike.
+        assert_eq!(clean_device_name("Tablet\u{202E}gnp.exe"), "Tabletgnp.exe");
+        assert_eq!(clean_device_name("Lenovo\u{200B} Tab"), "Lenovo Tab");
+        assert_eq!(
+            clean_device_name("Line\nbreak\tand   spaces "),
+            "Line break and spaces"
+        );
+        assert_eq!(clean_device_name("\u{FEFF}\u{2066}"), "tablet");
+        assert_eq!(clean_device_name("   "), "tablet");
+        assert_eq!(
+            clean_device_name(&"é".repeat(500)).chars().count(),
+            MAX_NAME
+        );
+        // Ordinary names, in any script, are left alone.
+        assert_eq!(clean_device_name("Lenovo Idea Tab"), "Lenovo Idea Tab");
+        assert_eq!(clean_device_name("タブレット"), "タブレット");
+        assert_eq!(clean_device_name("Stephen's <tab>"), "Stephen's <tab>");
+    }
 
     fn link() -> PairingLink {
         PairingLink {
@@ -552,7 +602,8 @@ mod tests {
         let (parsed, skipped) = PairedDevices::parse(&devices.serialize());
         assert_eq!(skipped, 0);
         assert_eq!(parsed.iter().count(), 1);
-        assert_eq!(parsed.iter().next().unwrap().name, "evil00001injected");
+        // Separators become plain spaces: one entry, no injected fields.
+        assert_eq!(parsed.iter().next().unwrap().name, "evil 0000 1 injected");
     }
 
     #[test]
