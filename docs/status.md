@@ -39,9 +39,13 @@ that held finished frames back, encoder reference frames) are written up in
 
 ### Known issues
 
-- Some dock extensions (seen with Dash2Dock Lite) can disappear after the
-  tablet's virtual monitor is added and removed many times in a row.
-  Turning the extension off and on again brings it back.
+- **Blur My Shell** (checked with its dock component on) throws
+  `TypeError: object.connect is not a function` whenever any monitor is
+  added or removed, which can leave a dock extension (seen with Dash2Dock
+  Lite) missing. Turning the dock extension off and on brings it back;
+  turning off Blur My Shell's dock blur avoids it. Since eb04720 the host
+  keeps the tablet's monitor for 10 s after a dropped connection, so Wi-Fi
+  blips no longer add and remove monitors.
 
 ### Not started
 
