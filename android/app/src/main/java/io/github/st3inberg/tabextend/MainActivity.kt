@@ -4,6 +4,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -15,68 +16,65 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.ComposeView
 
 /**
- * The tablet's whole UI: a full-screen surface showing the host's virtual
- * monitor, with a panel on top while not streaming: status, pairing
- * buttons, computers found on the network, and the code during pairing.
+ * The whole app: a full-screen surface for the computer's screen, with the
+ * Compose screens (pairing, home, settings) on top while not streaming.
  */
-class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.Listener {
+class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.Listener, Actions {
     private lateinit var hosts: HostStore
+    private lateinit var settings: AppSettings
     private lateinit var surfaceView: SurfaceView
-    private lateinit var status: TextView
-    private lateinit var code: TextView
     private lateinit var stats: TextView
-    private lateinit var computers: LinearLayout
-    private lateinit var panel: LinearLayout
+    private lateinit var screens: ComposeView
     private lateinit var discovery: Discovery
+    private val state = UiState()
 
     private var session: StreamSession? = null
     private val input = InputTranslator { surfaceView.width to surfaceView.height }
     /** A pairing in progress: from a QR code or link, or a computer picked from the list. */
     private var pendingTarget: Target? = null
+    private var pendingName: String? = null
+    private var surfaceReady = false
+    private var streamedSize: Pair<Int, Int>? = null
 
     private val scan = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val link = result.data?.dataString ?: return@registerForActivityResult
-        handlePairingIntent(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(link)))
-        restartSession()
+        handlePairingIntent(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
     }
-    private var surfaceReady = false
-    private var streamedSize: Pair<Int, Int>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hosts = HostStore(this)
-        discovery = Discovery(this) { found -> runOnUiThread { showComputers(found) } }
+        settings = AppSettings(this)
+        discovery = Discovery(this) { found -> runOnUiThread { state.computers = found } }
+        state.playSound = settings.playSound
+        state.showStats = settings.showStats
+        state.version = packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+        state.computerName = hosts.load()?.let { hosts.name() }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildLayout()
+        showScreen(if (state.computerName != null) Screen.Home else Screen.Pairing)
         handlePairingIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handlePairingIntent(intent)
-        restartSession()
     }
 
     /** On rotation, reconnect so the host recreates the monitor at the new size. */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         val size = windowManager.maximumWindowMetrics.bounds
-        if (size.width() != streamedSize?.first || size.height() != streamedSize?.second) {
+        if (session != null && (size.width() != streamedSize?.first || size.height() != streamedSize?.second)) {
             restartSession()
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        goImmersive()
     }
 
     private fun buildLayout() {
@@ -85,44 +83,6 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
             setOnTouchListener { _, event -> forward(input.onTouch(event)) }
             setOnGenericMotionListener { _, event -> forward(input.onGenericMotion(event)) }
         }
-        status = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 18f
-            gravity = Gravity.CENTER
-        }
-        code = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 64f
-            gravity = Gravity.CENTER
-            letterSpacing = 0.1f
-            visibility = View.GONE
-        }
-        fun button(label: Int, action: () -> Unit) = Button(this).apply {
-            text = getString(label)
-            setOnClickListener { action() }
-        }
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            addView(button(R.string.scan_qr) { scan.launch(Intent(this@MainActivity, ScannerActivity::class.java)) })
-            addView(button(R.string.find_computers) { findComputers() })
-            addView(button(R.string.paste_link) { pasteLink() })
-        }
-        computers = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-        }
-        val wrap = { LinearLayout.LayoutParams(-2, -2).apply { topMargin = 32 } }
-        panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.BLACK)
-            setPadding(48, 48, 48, 48)
-            addView(status)
-            addView(code, wrap())
-            addView(buttons, wrap())
-            addView(computers, wrap())
-        }
         stats = TextView(this).apply {
             setTextColor(Color.argb(200, 255, 255, 255))
             setBackgroundColor(Color.argb(120, 0, 0, 0))
@@ -130,22 +90,42 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
             setPadding(12, 6, 12, 6)
             visibility = View.GONE
         }
+        screens = ComposeView(this).apply {
+            setContent { TabExtendTheme { App(state, this@MainActivity) } }
+        }
         setContentView(FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(surfaceView, FrameLayout.LayoutParams(-1, -1))
-            addView(panel, FrameLayout.LayoutParams(-1, -1))
             addView(stats, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
+            addView(screens, FrameLayout.LayoutParams(-1, -1))
         })
+    }
+
+    /** Full screen only while streaming; normal system bars everywhere else. */
+    private fun showScreen(screen: Screen) {
+        state.screen = screen
+        val streaming = screen == Screen.Streaming
+        screens.visibility = if (streaming) View.GONE else View.VISIBLE
+        stats.visibility = if (streaming && state.showStats) View.VISIBLE else View.GONE
+        window.insetsController?.let {
+            if (streaming) {
+                it.hide(WindowInsets.Type.systemBars())
+                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                it.show(WindowInsets.Type.systemBars())
+            }
+        }
+        if (streaming) discovery.stop()
     }
 
     /** Send input to the host while streaming; true means the event was used. */
     private fun forward(messages: List<Message>): Boolean {
-        val active = session ?: return false
+        val active = session?.takeIf { state.screen == Screen.Streaming } ?: return false
         active.sendInput(messages)
         return true
     }
 
-    /** Keys from a physical keyboard go to the laptop; everything else stays here. */
+    /** Keys from a physical keyboard go to the computer while streaming. */
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
         forwardKey(event) || super.onKeyDown(keyCode, event)
 
@@ -153,64 +133,95 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         forwardKey(event) || super.onKeyUp(keyCode, event)
 
     private fun forwardKey(event: KeyEvent): Boolean {
-        if (panel.visibility == View.VISIBLE) return false
+        if (state.screen != Screen.Streaming) return false
         val key = session?.let { input.onKey(event) } ?: return false
         session?.sendInput(listOf(key))
         return true
-    }
-
-    private fun goImmersive() {
-        window.insetsController?.let {
-            it.hide(WindowInsets.Type.systemBars())
-            it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
     }
 
     private fun handlePairingIntent(intent: Intent?) {
         val uri = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString ?: return
         val link = PairingLink.parse(uri)
         if (link == null) {
-            showPanel(getString(R.string.bad_link))
+            state.error = getString(R.string.bad_link)
+            showScreen(Screen.Pairing)
             return
         }
-        pendingTarget = Target.WithToken(link.host, link.token)
-        showPanel(getString(R.string.pairing, fingerprintText(link.host.fingerprint)))
+        startPairing(Target.WithToken(link.host, link.token), null)
     }
 
-    private fun findComputers() {
-        discovery.start()
-        showComputers(emptyList())
-    }
-
-    /** One button per computer open for pairing. */
-    private fun showComputers(found: List<FoundComputer>) {
-        computers.removeAllViews()
-        val pairable = found.filter { it.pairing }
-        if (pairable.isEmpty()) {
-            computers.addView(TextView(this).apply {
-                setTextColor(Color.LTGRAY)
-                text = getString(R.string.searching)
-            })
-        }
-        for (computer in pairable) {
-            computers.addView(Button(this).apply {
-                text = computer.name
-                setOnClickListener {
-                    discovery.stop()
-                    computers.removeAllViews()
-                    pendingTarget = Target.ByCode(computer.address, computer.port, computer.name)
-                    restartSession()
-                }
-            })
-        }
-    }
-
-    private fun pasteLink() {
-        val clip = getSystemService(ClipboardManager::class.java)?.primaryClip
-        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
-        handlePairingIntent(Intent(Intent.ACTION_VIEW).apply { data = android.net.Uri.parse(text ?: "") })
+    private fun startPairing(target: Target, name: String?) {
+        discovery.stop()
+        state.searching = false
+        state.error = null
+        state.code = null
+        pendingTarget = target
+        pendingName = name
+        state.status = getString(R.string.connecting, name ?: target.address)
         restartSession()
     }
+
+    // Actions from the screens.
+
+    override fun scanQr() = scan.launch(Intent(this, ScannerActivity::class.java))
+
+    override fun findComputers() {
+        state.error = null
+        state.searching = true
+        discovery.start()
+    }
+
+    override fun pasteLink() {
+        val clip = getSystemService(ClipboardManager::class.java)?.primaryClip
+        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
+        handlePairingIntent(Intent(Intent.ACTION_VIEW, Uri.parse(text ?: "")))
+    }
+
+    override fun pick(computer: FoundComputer) =
+        startPairing(Target.ByCode(computer.address, computer.port, computer.name), computer.name)
+
+    override fun retry() {
+        state.error = null
+        restartSession()
+    }
+
+    override fun openSettings() = showScreen(Screen.Settings)
+
+    override fun back() {
+        state.code = null
+        state.searching = false
+        discovery.stop()
+        showScreen(if (state.computerName != null) Screen.Home else Screen.Pairing)
+    }
+
+    override fun pairAnother() {
+        state.error = null
+        showScreen(Screen.Pairing)
+    }
+
+    override fun forget() {
+        stopSession()
+        hosts.clear()
+        state.computerName = null
+        state.error = null
+        showScreen(Screen.Pairing)
+    }
+
+    override fun setPlaySound(on: Boolean) {
+        settings.playSound = on
+        state.playSound = on
+    }
+
+    override fun setShowStats(on: Boolean) {
+        settings.showStats = on
+        state.showStats = on
+    }
+
+    override fun openSource() {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(getString(R.string.source_url))))
+    }
+
+    // The video surface and the session.
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         surfaceReady = true
@@ -227,16 +238,13 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
     private fun restartSession() {
         stopSession()
         if (!surfaceReady) return
-        val target = pendingTarget ?: hosts.load()?.let { Target.Paired(it) }
-        if (target == null) {
-            showPanel(getString(R.string.not_paired))
-            return
-        }
+        val target = pendingTarget ?: hosts.load()?.let { Target.Paired(it) } ?: return
+        state.busy = true
         val display = displayInfo()
         val panel = windowManager.maximumWindowMetrics.bounds
         streamedSize = panel.width() to panel.height()
         session = StreamSession(
-            target, deviceName(), display, surfaceView.holder.surface, this,
+            target, deviceName(), display, surfaceView.holder.surface, settings.playSound, this,
         ).also { it.start() }
     }
 
@@ -244,6 +252,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         session?.stop()
         session = null
         input.reset()
+        state.busy = false
     }
 
     override fun onDestroy() {
@@ -268,43 +277,47 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback, StreamSession.
         Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
             ?.takeIf { it.isNotBlank() } ?: Build.MODEL
 
-    private fun showPanel(text: String) = runOnUiThread {
-        status.text = text
-        code.visibility = View.GONE
-        panel.visibility = View.VISIBLE
-        stats.visibility = View.GONE
-    }
-
     // StreamSession.Listener: called on the session thread.
 
-    override fun onStatus(text: String) = showPanel(text)
+    override fun onStatus(text: String) = runOnUiThread {
+        state.status = text
+        state.busy = true
+        if (state.screen == Screen.Streaming) {
+            showScreen(if (state.computerName != null) Screen.Home else Screen.Pairing)
+        }
+    }
 
     override fun onStreaming(width: Int, height: Int, decoder: String, lowLatency: Boolean) = runOnUiThread {
-        discovery.stop()
-        panel.visibility = View.GONE
-        stats.visibility = View.VISIBLE
+        state.code = null
+        state.error = null
         stats.text = getString(R.string.streaming, width, height, decoder, if (lowLatency) " (low latency)" else "")
+        showScreen(Screen.Streaming)
     }
 
     override fun onPaired(host: Host) = runOnUiThread {
-        hosts.save(host)
+        hosts.save(host, pendingName)
+        state.computerName = hosts.name()
         pendingTarget = null
+        pendingName = null
     }
 
     override fun onConfirmCode(code: String, computer: String) = runOnUiThread {
-        status.text = getString(R.string.confirm_code, computer)
-        this.code.text = code
-        this.code.visibility = View.VISIBLE
-        panel.visibility = View.VISIBLE
+        state.code = code
+        state.codeComputer = computer
+        showScreen(Screen.Pairing)
     }
 
     override fun onStats(fps: Double, mbps: Double, decodeMs: Double) = runOnUiThread {
         stats.text = getString(R.string.stats, fps, mbps, decodeMs)
     }
 
-    override fun onGaveUp(reason: String) {
-        runOnUiThread { pendingTarget = null }
-        showPanel(reason)
+    override fun onGaveUp(reason: String) = runOnUiThread {
+        pendingTarget = null
+        pendingName = null
+        state.code = null
+        state.busy = false
+        state.error = reason
+        showScreen(if (state.computerName != null) Screen.Home else Screen.Pairing)
     }
 
     private companion object {

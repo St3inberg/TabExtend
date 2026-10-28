@@ -45,6 +45,7 @@ class StreamSession(
     private val deviceName: String,
     private val display: DisplayInfo,
     private val surface: Surface,
+    private val playSound: Boolean,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -89,7 +90,7 @@ class StreamSession(
                 if (target is Target.ByCode) {
                     Outcome.GiveUp("Pairing failed: $why")
                 } else {
-                    listener.onStatus(if (e is IOException) "Connection lost: $why" else "Error: $why")
+                    listener.onStatus(describe(e))
                     Outcome.Retry
                 }
             }
@@ -163,7 +164,7 @@ class StreamSession(
             val writer = Thread({ writeLoop(output) }, "tabextend-writer").apply { start() }
             streaming = true
             listener.onStreaming(width, height, decoder.name, decoder.lowLatency || decoder.vendorLowLatency.isNotEmpty())
-            val audio = AudioPlayer()
+            val audio = if (playSound) AudioPlayer() else null
             try {
                 stream(input, decoder, audio)
             } finally {
@@ -171,7 +172,7 @@ class StreamSession(
                 writer.interrupt()
                 outbox.clear()
                 decoder.release()
-                audio.release()
+                audio?.release()
             }
             return Outcome.Streamed
         }
@@ -192,7 +193,7 @@ class StreamSession(
         }
     }
 
-    private fun stream(input: DataInputStream, decoder: VideoDecoder, audio: AudioPlayer) {
+    private fun stream(input: DataInputStream, decoder: VideoDecoder, audio: AudioPlayer?) {
         var waitingForKeyframe = true
         var windowStart = System.nanoTime()
         var windowFrames = decoder.framesRendered
@@ -209,7 +210,7 @@ class StreamSession(
                         outbox.offer(Message.RequestKeyframe)
                     }
                 }
-                is Message.Audio -> audio.write(message.pcm)
+                is Message.Audio -> audio?.write(message.pcm)
                 is Message.Ping -> outbox.offer(Message.Pong(message.id, message.sentUs))
                 is Message.Reject -> throw IOException(message.detail)
                 else -> {}
@@ -247,5 +248,19 @@ class StreamSession(
     private companion object {
         const val MAX_BACKOFF_MS = 5000L
         const val OUTBOX_CAPACITY = 1024
+    }
+}
+
+/** A short explanation for the home screen; the details are in the log. */
+internal fun describe(e: Exception): String {
+    android.util.Log.i("TabExtend", "connection failed", e)
+    val text = e.message.orEmpty()
+    return when {
+        e is java.net.ConnectException || "ECONNREFUSED" in text || "ETIMEDOUT" in text ||
+            "EHOSTUNREACH" in text || "ENETUNREACH" in text ->
+            "Waiting for the computer. Start TabExtend on it, on the same network."
+        e is javax.net.ssl.SSLException -> "Secure connection failed. If TabExtend was reinstalled on the computer, pair again from Settings."
+        e is IOException -> "Connection lost. Trying again…"
+        else -> "Error: ${text.ifEmpty { e.javaClass.simpleName }}"
     }
 }

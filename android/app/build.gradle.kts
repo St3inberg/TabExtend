@@ -1,11 +1,12 @@
 // Kotlin support is built into the Android Gradle Plugin from 9.0.
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "io.github.st3inberg.tabextend"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "io.github.st3inberg.tabextend"
@@ -41,6 +42,10 @@ android {
         }
     }
 
+    buildFeatures {
+        compose = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -50,6 +55,13 @@ android {
 dependencies {
     // For scanning the pairing QR code (all Apache-2.0, no Google Play services).
     implementation("androidx.activity:activity:1.13.0")
+
+    // The app's screens: Jetpack Compose with Material 3 (Apache-2.0).
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.camera:camera-camera2:1.6.2")
     implementation("androidx.camera:camera-lifecycle:1.6.2")
     implementation("androidx.camera:camera-view:1.6.2")

@@ -61,13 +61,17 @@ class HostStore(context: Context) {
         return Host(address, prefs.getInt("port", 0), fingerprint)
     }
 
-    fun save(host: Host) {
+    fun save(host: Host, name: String?) {
         prefs.edit()
             .putString("address", host.address)
             .putInt("port", host.port)
             .putString("fingerprint", hex(host.fingerprint))
+            .putString("name", name ?: host.address)
             .apply()
     }
+
+    /** The computer's name if it was paired by scanning, else its address. */
+    fun name(): String? = prefs.getString("name", null) ?: prefs.getString("address", null)
 
     fun clear() = prefs.edit().clear().apply()
 }
