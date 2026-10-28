@@ -16,7 +16,10 @@ mkdir -p "$bin" "$share/applications" "$share/icons/hicolor/scalable/apps"
 for program in tabextend tabextend-app; do
     if [ -f "$here/$program" ]; then install -m 755 "$here/$program" "$bin/"; fi
 done
-install -m 644 "$here/$id.desktop" "$share/applications/"
+# The full path: ~/.local/bin is not always on the desktop session's PATH.
+sed "s|^Exec=tabextend-app|Exec=$bin/tabextend-app|" "$here/$id.desktop" \
+    > "$share/applications/$id.desktop"
+chmod 644 "$share/applications/$id.desktop"
 install -m 644 "$here/$id.svg" "$share/icons/hicolor/scalable/apps/"
 echo "Installed to $bin. TabExtend is now in your app list."
 case ":$PATH:" in *":$bin:"*) ;; *) echo "Note: $bin is not on your PATH." ;; esac
