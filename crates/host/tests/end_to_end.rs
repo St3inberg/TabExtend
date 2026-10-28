@@ -823,6 +823,38 @@ async fn reveal_that_breaks_the_commitment_is_refused_without_asking() {
 }
 
 #[tokio::test]
+async fn strangers_cannot_put_messages_on_the_screen() {
+    // Pairing is closed: a code-pairing request is refused without telling
+    // the user, so nobody can spam the desktop with names they chose.
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let host = start_host_inner(
+        Arc::new(TestPattern::default()),
+        Arc::default(),
+        Arc::default(),
+        Arc::new(FixedAnswer(false)),
+        false,
+        Some({
+            let events = events.clone();
+            Arc::new(move |event: ServerEvent| events.lock().unwrap().push(event.to_string()))
+        }),
+    )
+    .await;
+    for _ in 0..5 {
+        let mut client = Tablet::new()
+            .connect(&host, host.fingerprint)
+            .await
+            .unwrap();
+        client.hello_confirm(&[7; 32]).await;
+        expect_reject(&mut client, RejectReason::PairingDenied).await;
+    }
+    let shown = events.lock().unwrap().clone();
+    assert!(
+        shown.iter().all(|e| !e.contains("pairing")),
+        "pairing refusals reached the screen: {shown:?}"
+    );
+}
+
+#[tokio::test]
 async fn pairing_by_code_needs_pairing_mode() {
     let approver = Arc::new(RecordingApprover::default());
     let host = start_host_full(TestPattern::default(), approver.clone(), false).await;

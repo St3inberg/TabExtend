@@ -310,10 +310,17 @@ impl Server {
                 });
             }
             PairingRequest::Confirm { commitment } => {
+                // Anyone can send this; tell the user only while they are
+                // pairing. Otherwise any machine on the network could keep
+                // putting messages (with a name it chose) on the screen.
+                let user_is_pairing = self.pairing.lock().expect("pairing lock").is_some();
                 let outcome = self
                     .confirm(&mut reader, &mut writer, commitment, client, &device_name)
                     .await?;
                 if let Err((reason, why)) = outcome {
+                    if !user_is_pairing {
+                        return reject(&mut writer, reason, &why).await;
+                    }
                     self.emit(ServerEvent::Refused {
                         peer: peer.to_string(),
                         reason: format!("pairing with {device_name} failed: {why}"),
