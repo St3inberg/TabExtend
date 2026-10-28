@@ -7,8 +7,9 @@
 //!    certificate fingerprint already in the paired-devices list.
 //! 4. No other tablet is streaming.
 
+use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -59,6 +60,58 @@ pub struct ServerOptions {
     pub keep_monitor: Duration,
 }
 
+/// Connections that have not yet shown they belong to a paired tablet (TLS
+/// handshake, hello, pairing). Anyone on the network can open these, so
+/// they are capped: per address, so one machine flooding the port cannot
+/// lock a tablet out, and in total, so many machines cannot exhaust file
+/// descriptors. Authenticated sessions do not count.
+const MAX_PENDING_PER_ADDRESS: usize = 8;
+const MAX_PENDING: usize = 64;
+/// After a failed accept (e.g. out of file descriptors), wait this long and
+/// keep serving instead of giving up.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct Pending {
+    per_address: HashMap<IpAddr, usize>,
+    total: usize,
+}
+
+/// One unauthenticated connection's place under the caps; freed on drop.
+struct PendingSlot {
+    pending: Arc<Mutex<Pending>>,
+    address: IpAddr,
+}
+
+impl PendingSlot {
+    fn take(pending: &Arc<Mutex<Pending>>, address: IpAddr) -> Option<Self> {
+        let mut p = pending.lock().expect("pending");
+        let mine = p.per_address.get(&address).copied().unwrap_or(0);
+        if p.total >= MAX_PENDING || mine >= MAX_PENDING_PER_ADDRESS {
+            return None;
+        }
+        p.total += 1;
+        *p.per_address.entry(address).or_default() += 1;
+        Some(Self {
+            pending: pending.clone(),
+            address,
+        })
+    }
+}
+
+impl Drop for PendingSlot {
+    fn drop(&mut self) {
+        let mut p = self.pending.lock().expect("pending");
+        p.total -= 1;
+        if let Some(count) = p.per_address.get_mut(&self.address) {
+            *count -= 1;
+            if *count == 0 {
+                p.per_address.remove(&self.address);
+            }
+        }
+    }
+}
+
 /// How long the monitor waits for its tablet by default.
 pub const KEEP_MONITOR: Duration = Duration::from_secs(10);
 
@@ -84,6 +137,7 @@ pub struct Server {
     events: Events,
     parked: Arc<Mutex<Option<Parked>>>,
     parked_seq: AtomicU64,
+    pending: Arc<Mutex<Pending>>,
 }
 
 impl Server {
@@ -107,6 +161,7 @@ impl Server {
             events: print_events(),
             parked: Arc::new(Mutex::new(None)),
             parked_seq: AtomicU64::new(0),
+            pending: Arc::default(),
         })
     }
 
@@ -177,10 +232,25 @@ impl Server {
 
     pub async fn run(self: Arc<Self>, listener: TcpListener) -> io::Result<()> {
         loop {
-            let (tcp, peer) = listener.accept().await?;
+            let (tcp, peer) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(e) => {
+                    // Usually out of file descriptors. Returning here would
+                    // stop the host for good; wait and keep serving.
+                    eprintln!("accept failed: {e}");
+                    tokio::time::sleep(ACCEPT_RETRY).await;
+                    continue;
+                }
+            };
+            // Over the cap: close at once, without an event per connection
+            // (a flood would bury the window in notices).
+            let Some(slot) = PendingSlot::take(&self.pending, peer.ip().to_canonical()) else {
+                drop(tcp);
+                continue;
+            };
             let server = self.clone();
             tokio::spawn(async move {
-                if let Err(e) = server.handle(tcp, peer).await {
+                if let Err(e) = server.handle(tcp, peer, slot).await {
                     server.emit(ServerEvent::Refused {
                         peer: peer.to_string(),
                         reason: e.to_string(),
@@ -190,7 +260,7 @@ impl Server {
         }
     }
 
-    async fn handle(&self, tcp: TcpStream, peer: SocketAddr) -> io::Result<()> {
+    async fn handle(&self, tcp: TcpStream, peer: SocketAddr, slot: PendingSlot) -> io::Result<()> {
         tcp.set_nodelay(true)?;
         let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.tls.accept(tcp))
             .await
@@ -265,6 +335,9 @@ impl Server {
             }
             PairingRequest::None => {}
         }
+        // A paired tablet from here on: it no longer counts against the
+        // caps on unauthenticated connections.
+        drop(slot);
 
         let Some(_busy) = BusyGuard::take(&self.busy) else {
             return reject(

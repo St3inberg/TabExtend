@@ -416,6 +416,41 @@ async fn monitor_is_removed_when_the_tablet_stays_away() {
 }
 
 #[tokio::test]
+async fn a_flood_of_idle_connections_does_not_lock_the_tablet_out() {
+    let host = start_host().await;
+    let tablet = Tablet::new();
+    let mut client = tablet.connect(&host, host.fingerprint).await.unwrap();
+    client.hello(Some(TOKEN)).await;
+    expect_stream(&mut client).await;
+    drop(client);
+
+    // Another machine (127.0.0.2) opens many connections and says nothing.
+    let mut flood = Vec::new();
+    for _ in 0..200 {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+        flood.push(socket.connect(host.address).await.unwrap());
+    }
+    // The paired tablet still gets in.
+    let _client = reconnect(&host, &tablet).await;
+
+    // And the host closed what was over the cap instead of holding it.
+    let mut closed = 0;
+    for stream in &mut flood {
+        let mut byte = [0u8; 1];
+        if let Ok(Ok(0)) =
+            tokio::time::timeout(Duration::from_millis(20), stream.read(&mut byte)).await
+        {
+            closed += 1;
+        }
+    }
+    assert!(
+        closed >= 190,
+        "only {closed} of 200 flood connections were closed"
+    );
+}
+
+#[tokio::test]
 async fn unpaired_tablet_gets_nothing() {
     let host = start_host().await;
     let mut client = Tablet::new()
