@@ -40,6 +40,7 @@ Fedora, Ubuntu and Arch.
 
 ## Documentation
 
+- [How it works](docs/architecture.md): diagrams of the whole program and its algorithms
 - [Status](docs/status.md): what works, what does not and why
 - [Setup tutorial](docs/setup.md): install, build and check your machine
 - [Development guide](docs/development.md): code layout, tests, tablet debugging
