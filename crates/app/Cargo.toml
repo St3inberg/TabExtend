@@ -17,5 +17,5 @@ tabextend-host = { path = "../host", version = "0.2.0" }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 async-channel = "2"
-qrcode = { version = "0.14", default-features = false }
+qrcode = { version = "0.15", default-features = false }
 tokio = { version = "1", features = ["signal", "rt-multi-thread", "sync", "time"] }
